@@ -1,0 +1,11 @@
+media/*			linguist-vendored
+cldr/*			linguist-vendored
+tz_database_latest/*	linguist-vendored
+*.inc			linguist-language=Pascal
+*			text=auto
+*.pas			text
+*.inc			text
+*.dpr			text
+*.dproj			text
+*.dfm			text
+*.groupproj		text

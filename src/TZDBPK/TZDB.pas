@@ -1,5 +1,5 @@
 (*
-* Copyright (c) 2010-2013, Ciobanu Alexandru
+* Copyright (c) 2010-2020, Alexandru Ciobanu (alex+git@ciobanu.org)
 * All rights reserved.
 *
 * Redistribution and use in source and binary forms, with or without
@@ -35,13 +35,19 @@ interface
 uses
   SysUtils,
   DateUtils,
-  Classes
-{$IFNDEF SUPPORTS_TARRAY}, Types{$ENDIF}
-{$IFDEF SUPPORTS_TTIMESPAN}, TimeSpan{$ENDIF};
-
+  Types,
+{$IFDEF DELPHI}
+  TimeSpan,
+  Generics.Collections,
+  Generics.Defaults,
+{$ELSE}
+  FGL,
+  SyncObjs,
+{$ENDIF}
+  Classes;
 
 type
-{$IFNDEF SUPPORTS_TTIMEZONE}
+{$IFNDEF DELPHI}
   ///  <summary>Exception thrown when the passed local time is invalid.</summary>
   ELocalTimeInvalid = class(Exception);
 
@@ -62,55 +68,83 @@ type
   ///  is not present in the bundled database or that its format is invalid.</summary>
   ETimeZoneInvalid = class(Exception);
 
+  ///  <summary>Exception type used to signal the caller code that date/time year details are not
+  ///  bundled for the given time zone.</summary>
+  EUnknownTimeZoneYear = class(Exception);
+
+  ///  Special type used to manipulate TDateTime in millisecond precision.
+  ///  This is an internal type.
+  TPreciseTime = type Int64;
+
+  /// <summary>Represents a specific date/time segment of the year.</summary>
+  /// <remarks>A calendar year in most time zones is divided into standard/ambiguous/daylight/invalid/standard segments.</remarks>
+  TYearSegment = record
+  private
+    FStartsAt, FEndsAt: TPreciseTime;
+    FType: TLocalTimeType;
+    FName: string;
+    FPeriodOffset, FBias: Int64;
+
+    function GetUtcOffset: {$IFDEF DELPHI}TTimeSpan{$ELSE}Int64{$ENDIF}; inline;
+    function GetStartsAt: TDateTime;
+    function GetEndsAt: TDateTime;
+  public
+    /// <summary>The date/time when the segment starts.</summary>
+    /// <returns>A date/time value representing the start of the segment.</returns>
+    property StartsAt: TDateTime read GetStartsAt;
+
+    /// <summary>The date/time when the segment ends.</summary>
+    /// <returns>A date/time value representing the end of the segment.</returns>
+    property EndsAt: TDateTime read GetEndsAt;
+
+    /// <summary>The type of the segment.</summary>
+    /// <returns>An enum value representing the type of the segment.</returns>
+    property LocalType: TLocalTimeType read FType;
+
+    /// <summary>The time zone display name used to describe the segment.</summary>
+    /// <returns>The string value of the display name.</returns>
+    property DisplayName: string read FName;
+
+    /// <summary>The time zone UTC offset.</summary>
+    /// <returns>The UTC offset including the DST bias.</returns>
+    property UtcOffset: {$IFDEF DELPHI}TTimeSpan{$ELSE}Int64{$ENDIF} read GetUtcOffset;
+
+{$IFDEF FPC}
+    /// <summary>Equality operator used to compare two values of this type</summary>
+    /// <param name="ALeft">The first segment to compare.</summary>
+    /// <param name="ARight">The second segment to compare.</summary>
+    /// <returns><c>True</c> if the segments are equal.</returns>
+    class operator Equal(const ALeft, ARight: TYearSegment): Boolean;
+{$ENDIF}
+  end;
+
+  /// <summary>An array of year segments.</summary>
+  TYearSegmentArray = array of TYearSegment;
+
   ///  <summary>A timezone class implementation that retreives its data from the bundled database.</summary>
   ///  <remarks>This class inherits the standard <c>TTimeZone</c> class in Delphi XE.</remarks>
-  TBundledTimeZone = class{$IFDEF SUPPORTS_TTIMEZONE}(TTimeZone){$ENDIF}
+  TBundledTimeZone = class
   private
-    FZone: Pointer;         { PZone }
-    FPeriods: TList;        { TCompiledPeriod }
+    FZone: Pointer; { PZone }
 
-    { Compile periods into something useful }
-    procedure CompilePeriods;
+{$IFNDEF DELPHI}
+    FSegmentsByYearLock: TCriticalSection;
+{$ENDIF}
+    FSegmentsByYear: {$IFDEF DELPHI}TDictionary{$ELSE}TFPGMap{$ENDIF}<Word, TYearSegmentArray>;
 
-    { Helpers }                                                  { TCompiledPeriod }       { TCompiledRule }
-    function GetPeriodAndRule(const ADateTime: TDateTime; out APeriod: TObject; out ARule: TObject): Boolean;
-
-    procedure GetTZData(const ADateTime: TDateTime; out AOffset,
-      ADstSave: Int64; out AType: TLocalTimeType; out ADisplayName, ADstDisplayName: string);
-
-{$IFNDEF SUPPORTS_TTIMEZONE}
-    { Purely internal getters }
+    function GetSegment(const AYear: Word; const APreciseTime: TPreciseTime;
+      const AForceDaylight: Boolean; const AFailOnInvalid: Boolean): TYearSegment;
+    function GetSegmentUtc(const AYear: Word; const APreciseTime: TPreciseTime): TYearSegment;
+    function TryFindSegment(const AYear: Word; const AType: TLocalTimeType; const ARev: Boolean;
+      out ASegment: TYearSegment): Boolean;
     function GetCurrentAbbreviation: string;
     function GetCurrentDisplayName: string;
-    function GetCurrentUtcOffset: {$IFDEF SUPPORTS_TTIMESPAN}TTimeSpan{$ELSE}Int64{$ENDIF};
-
-    { Other good stuff }
-    function GetUtcOffsetInternal(const ADateTime: TDateTime; const ForceDaylight: Boolean = false): Int64;
-{$ENDIF}
+    function GetCurrentUtcOffset: {$IFDEF DELPHI}TTimeSpan{$ELSE}Int64{$ENDIF};
 
   protected
-{$IFDEF SUPPORTS_TTIMEZONE}
-    ///  <summary>Retrieves the standard bias, DST bias and the type of the given local time.</summary>
-    ///  <param name="ADateTime">The local time for which to retrieve the data.</param>
-    ///  <param name="AOffset">The returned standard bias of the time zone for the given time.</param>
-    ///  <param name="ADstSave">The returned DST bias of the time zone for the given time.</param>
-    ///  <param name="AType">The returned type of the local time.</param>
-    ///  <remarks>The value of <paramref name="ADstSave"/> is only relevant if
-    ///  <paramref name="AType"/> is <c>lttAmbiguous</c> or <c>lttDaylight</c>.</remarks>
-    procedure DoGetOffsetsAndType(
-      const ADateTime: TDateTime; out AOffset, ADstSave: Int64; out AType: TLocalTimeType); override;
-
-    ///  <summary>Retrieves the display name for the time zone based on a given local time.</summary>
-    ///  <param name="ADateTime">The local time for which to retrieve the display name.</param>
-    ///  <param name="ForceDaylight">Forces the timezone class to select the DST display name if the local time
-    ///  is whithin the ambiguous period.</param>
-    ///  <returns>The display name used to accompany the given local time.</returns>
-    function DoGetDisplayName(const ADateTime: TDateTime; const ForceDaylight: Boolean): string; override;
-{$ENDIF}
-
     ///  <summary>Returns the ID of the timezone. An ID is a string that should uniquely identify the timezone.</summary>
     ///  <returns>The ID of the timezone.</returns>
-    function DoGetID: string; {$IFDEF SUPPORTS_TTIMEZONE}override;{$ENDIF}
+    function DoGetID: string;
    public
     ///  <summary>Creates a new instance of this timezone class.</summary>
     ///  <param name="ATimeZoneID">The ID of the timezone to use (ex. "Europe/Bucharest").</param>
@@ -124,18 +158,109 @@ type
     ///  <param name="AIncludeAliases">Pass <c>True</c> to include time zone aliases into the list.</param>
     ///  <returns>An array of strings representing the IDs of the known time zones.</returns>
     class function KnownTimeZones(const
-      AIncludeAliases: Boolean = False): {$IFDEF SUPPORTS_TARRAY}TArray<string>{$ELSE}TStringDynArray{$ENDIF};
+      AIncludeAliases: Boolean = False): TStringDynArray;
+
+    ///  <summary>Returns a list of known time zone aliases.</summary>
+    ///  <returns>An array of strings representing the aliases of the known time zones.</returns>
+    class function KnownAliases: TStringDynArray;
+
+    ///  <summary>Returns the time zone name for a given alias.</summary>
+    ///  <param name="AAlias">The alias to lookup.</param>
+    ///  <returns>The name of the time zone, if found.</returns>
+    ///  <exception cref="TZDB|ETimeZoneInvalid">The specified alias cannot be found in the bundled database.</exception>
+    class function GetTimeZoneFromAlias(const AAliasID: string): string; inline;
 
     ///  <summary>Returns an instance of this time zone class.</summary>
     ///  <param name="ATimeZoneID">The ID of the timezone to use (ex. "Europe/Bucharest").</param>
     ///  <exception cref="TZDB|ETimeZoneInvalid">The specified ID cannot be found in the bundled database.</exception>
     class function GetTimeZone(const ATimeZoneID: string): TBundledTimeZone;
 
-{$IFNDEF SUPPORTS_TTIMEZONE}
+    ///  <summary>Returns the version of the TZDB component.</summary>
+    ///  <returns>A string representing the version of the source.</returns>
+    class function Version: string;
+
+    ///  <summary>Returns the version of compiled TZDB database.</summary>
+    ///  <returns>A string representing the compiled version.</returns>
+    class function DbVersion: string;
+
+    ///  <summary>Breaks a given year into components segments.</summary>
+    ///  <param name="AYear">The year to get data for.</param>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified year is not in the bundled database.</exception>
+    function GetYearBreakdown(const AYear: Word): TYearSegmentArray;
+
+    ///  <summary>Get the starting date/time of daylight period.</summary>
+    ///  <remarks>This function considers the first period of this type and will not work properly for complicated time zones.</remarks>
+    ///  <param name="AYear">The year to get data for.</param>
+    ///  <returns>The start time of daylight saving period in the local time; or '00/00/0000 00:00:00.000' is there is no such date/time.</returns>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified year is not in the bundled database.</exception>
+    function DaylightTimeStart(const AYear: Word): TDateTime; inline;
+
+    ///  <summary>Get the starting date/time of standard period.</summary>
+    ///  <remarks>This function considers the first period of this type and will not work properly for complicated time zones.</remarks>
+    ///  <param name="AYear">The year to get data for.</param>
+    ///  <returns>The start date/time of standard period in local time; or '00/00/0000 00:00:00.000' is there is no such date/time.</returns>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified year is not in the bundled database.</exception>
+    function StandardTimeStart(const AYear: Word): TDateTime; inline;
+
+    ///  <summary>Get the starting date/time of invalid period.</summary>
+    ///  <remarks>This function considers the first period of this type and will not work properly for complicated time zones.</remarks>
+    ///  <param name="AYear">The year to get data for.</param>
+    ///  <returns>The start date/time of invalid period in local time; or '00/00/0000 00:00:00.000' is there is no such date/time.</returns>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified year is not in the bundled database.</exception>
+    function InvalidTimeStart(const AYear: word): TDateTime; inline;
+
+    ///  <summary>Get the starting date/time of ambiguous period.</summary>
+    ///  <remarks>This function considers the first period of this type and will not work properly for complicated time zones.</remarks>
+    ///  <param name="AYear">The year to get data for.</param>
+    ///  <returns>The start date/time of ambiguous period in local time; or '00/00/0000 00:00:00.000' is there is no such date/time.</returns>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified year is not in the bundled database.</exception>
+    function AmbiguousTimeStart(const AYear: word): TDateTime; inline;
+
+    ///  <summary>Get the ending date/time of daylight saving period.</summary>
+    ///  <remarks>This function considers the first period of this type and will not work properly for complicated time zones.</remarks>
+    ///  <param name="AYear">The year to get data for.</param>
+    ///  <returns>The end date/time of daylight saving period in local time; or '00/00/0000 00:00:00.000' is there is no such date/time.</returns>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified year is not in the bundled database.</exception>
+    function DaylightTimeEnd(const AYear: word): TDateTime; inline;
+
+    ///  <summary>Get the ending date/time of standard period.</summary>
+    ///  <remarks>This function considers the first period of this type and will not work properly for complicated time zones.</remarks>
+    ///  <param name="AYear">The year to get data for.</param>
+    ///  <returns>The ending date/time of standard period in local time; or '00/00/0000 00:00:00.000' is there is no such date/time.</returns>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified year is not in the bundled database.</exception>
+    function StandardTimeEnd(const AYear: word): TDateTime; inline;
+
+    ///  <summary>Get the ending date/time of invalid period.</summary>
+    ///  <remarks>This function considers the first period of this type and will not work properly for complicated time zones.</remarks>
+    ///  <param name="AYear">The year to get data for.</param>
+    ///  <returns>The end date/time of invalid period in local time; or '00/00/0000 00:00:00.000' is there is no such date/time.</returns>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified year is not in the bundled database.</exception>
+    function InvalidTimeEnd(const AYear: word): TDateTime; inline;
+
+    ///  <summary>Get the ending date/time of ambiguous period.</summary>
+    ///  <remarks>This function considers the first period of this type and will not work properly for complicated time zones.</remarks>
+    ///  <param name="AYear">The year to get data for.</param>
+    ///  <returns>The end date/time of ambiguous period in local time; or '00/00/0000 00:00:00.000' is there is no such date/time.</returns>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified year is not in the bundled database.</exception>
+    function AmbiguousTimeEnd(const AYear: word): TDateTime; inline;
+
+    ///  <summary>Determines if the timezone has daylight saving period.</summary>
+    ///  <param name="AYear">The year to check.</param>
+    ///  <returns><c>true</c> if the timezone has daylight saving time in the specified year.</returns>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified year is not in the bundled database.</exception>
+    function HasDaylightTime(const AYear: word): Boolean; inline;
+
+    ///  <summary>Converts an UTC date/time to ISO8601 date time string.</summary>
+    ///  <param name="ADateTime">The UTC date/time to convert.</param>
+    ///  <returns>The ISO8601 date/time string that corresponds to the passed UTC time.</returns>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified year is not in the bundled database.</exception>
+    function ToISO8601Format(const ADateTime: TDateTime): String;
+
     ///  <summary>Generates an abbreviation string for the given local time.</summary>
     ///  <param name="ADateTime">The local time.</param>
     ///  <param name="AForceDaylight">Specify a <c>True</c> value if ambiguous periods should be treated as DST.</param>
     ///  <returns>A string containing the abbreviation.</returns>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified date/time year is not in the bundled database.</exception>
     ///  <exception cref="TZDB|ELocalTimeInvalid">The specified local time is invalid.</exception>
     function GetAbbreviation(const ADateTime: TDateTime; const AForceDaylight: Boolean = false): string;
 
@@ -143,34 +268,40 @@ type
     ///  <param name="ADateTime">The local time.</param>
     ///  <param name="AForceDaylight">Specify a <c>True</c> value if ambiguous periods should be treated as DST.</param>
     ///  <returns>A string containing the display name.</returns>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified date/time year is not in the bundled database.</exception>
     ///  <exception cref="TZDB|ELocalTimeInvalid">The specified local time is invalid.</exception>
     function GetDisplayName(const ADateTime: TDateTime; const AForceDaylight: Boolean = false): string;
 
     ///  <summary>Returns the type of the local time.</summary>
     ///  <param name="ADateTime">The local time.</param>
     ///  <returns>An enumeration value specifying the type of the local time.</returns>
-    function GetLocalTimeType(const ADateTime: TDateTime): TLocalTimeType; {$IFDEF SUPPORTS_INLINE}inline;{$ENDIF}
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified date/time year is not in the bundled database.</exception>
+    function GetLocalTimeType(const ADateTime: TDateTime): TLocalTimeType;
 
     ///  <summary>Checks whether the specified local time is ambiguous.</summary>
     ///  <param name="ADateTime">The local time.</param>
     ///  <returns><c>True</c> if the local time is ambiguous; <c>False</c> otherwise.</returns>
-    function IsAmbiguousTime(const ADateTime: TDateTime): Boolean; {$IFDEF SUPPORTS_INLINE}inline;{$ENDIF}
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified date/time year is not in the bundled database.</exception>
+    function IsAmbiguousTime(const ADateTime: TDateTime): Boolean;
 
     ///  <summary>Checks whether the specified local time is daylight.</summary>
     ///  <param name="ADateTime">The local time.</param>
     ///  <param name="AForceDaylight">Specify a <c>True</c> value if ambiguous periods should be treated as DST.</param>
     ///  <returns><c>True</c> if the local time is ambiguous; <c>False</c> otherwise.</returns>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified date/time year is not in the bundled database.</exception>
     function IsDaylightTime(const ADateTime: TDateTime; const AForceDaylight: Boolean = false): Boolean;
 
     ///  <summary>Checks whether the specified local time is invalid.</summary>
     ///  <param name="ADateTime">The local time.</param>
     ///  <returns><c>True</c> if the local time is invalid; <c>False</c> otherwise.</returns>
-    function IsInvalidTime(const ADateTime: TDateTime): Boolean; {$IFDEF SUPPORTS_INLINE}inline;{$ENDIF}
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified date/time year is not in the bundled database.</exception>
+    function IsInvalidTime(const ADateTime: TDateTime): Boolean; inline;
 
     ///  <summary>Checks whether the specified local time is standard.</summary>
     ///  <param name="ADateTime">The local time.</param>
     ///  <param name="AForceDaylight">Specify a <c>True</c> value if ambiguous periods should be treated as DST.</param>
     ///  <returns><c>True</c> if the local time is standard; <c>False</c> otherwise.</returns>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified date/time year is not in the bundled database.</exception>
     function IsStandardTime(const ADateTime: TDateTime; const AForceDaylight: Boolean = false): Boolean;
 
     ///  <summary>Returns the UTC offset of the given local time.</summary>
@@ -178,12 +309,14 @@ type
     ///  <param name="AForceDaylight">Specify a <c>True</c> value if ambiguous periods should be treated as DST.</param>
     ///  <returns>The UTC offset of the given local time. Subtract this value from the passed local time to obtain an UTC time.</returns>
     ///  <exception cref="TZDB|ELocalTimeInvalid">The specified local time is invalid.</exception>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified date/time year is not in the bundled database.</exception>
     function GetUtcOffset(const ADateTime: TDateTime; const AForceDaylight: Boolean = false):
-      {$IFDEF SUPPORTS_TTIMESPAN}TTimeSpan{$ELSE}Int64{$ENDIF}; {$IFDEF SUPPORTS_INLINE}inline;{$ENDIF}
+      {$IFDEF DELPHI}TTimeSpan{$ELSE}Int64{$ENDIF};
 
     ///  <summary>Converts an UTC time to a local time.</summary>
     ///  <param name="ADateTime">The UTC time.</param>
     ///  <returns>The local time that corresponds to the passed UTC time.</returns>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified date/time year is not in the bundled database.</exception>
     function ToLocalTime(const ADateTime: TDateTime): TDateTime;
 
     ///  <summary>Converts a local time to an UTC time.</summary>
@@ -191,8 +324,9 @@ type
     ///  <param name="AForceDaylight">Specify a <c>True</c> value if ambiguous periods should be treated as DST.</param>
     ///  <returns>The UTC time that corresponds to the passed local time.</returns>
     ///  <exception cref="TZDB|ELocalTimeInvalid">The specified local time is invalid.</exception>
+    ///  <exception cref="TZDB|EUnknownTimeZoneYear">The specified date/time year is not in the bundled database.</exception>
     function ToUniversalTime(const ADateTime: TDateTime;
-      const AForceDaylight: Boolean = false): TDateTime; {$IFDEF SUPPORTS_INLINE}inline;{$ENDIF}
+      const AForceDaylight: Boolean = false): TDateTime;
 
     ///  <summary>Returns the ID of the timezone. An ID is a string that should uniquely identify the timezone.</summary>
     ///  <returns>The ID of the timezone.</returns>
@@ -208,31 +342,23 @@ type
 
     ///  <summary>Returns the current time zone's UTC offset.</summary>
     ///  <returns>The current UTC offset.</returns>
-    property UtcOffset: {$IFDEF SUPPORTS_TTIMESPAN}TTimeSpan{$ELSE}Int64{$ENDIF} read GetCurrentUtcOffset;
-{$ENDIF}
+    property UtcOffset: {$IFDEF DELPHI}TTimeSpan{$ELSE}Int64{$ENDIF} read GetCurrentUtcOffset;
   end;
 
 implementation
 
-uses
-{$IFNDEF SUPPORTS_MONITOR}
-  SyncObjs,
-{$ENDIF}
-  Contnrs,
-  IniFiles;
-
 resourcestring
   SNoBundledTZForName = 'Could not find any data for timezone "%s".';
-  STimeZoneHasNoPeriod =
-    'There is no matching period that matches date [%s] in timezone "%s".';
-
-{$IFNDEF SUPPORTS_TTIMEZONE}
+  SDateTimeNotResolvable = 'The date [%s] does not match any known period of timezone "%s".';
+  SYearNotResolvable = 'The year [%d] does not match any known period of timezone "%s".';
   SInvalidLocalTime = 'Local date/time value %s is invalid (does not exist in the time zone).';
-{$ENDIF}
+
+const
+  CComponentVersion = '2.1.0.123';
 
 type
   { Day type. Specifies the "relative" day in a month }
-  TDayType = (dtFixed, dtLastOfMonth, tdNthOfMonth);
+  TDayType = (dtFixed, dtLastOfMonth, dtNthOfMonth, dtPredOfMonth);
 
   { Specifies the mode in which a time value is specified }
   TTimeMode = (trLocal, trStandard, trUniversal);
@@ -244,9 +370,10 @@ type
         (FFixedDay: Word);
       dtLastOfMonth:
         (FLastDayOfWeek: Word);
-      tdNthOfMonth:
-        (FNthDayOfWeek: Word;
-          FDayIndex: Word);
+      dtNthOfMonth:
+        (FNthDayOfWeek: Word; FNthDayIndex: Word);
+      dtPredOfMonth:
+        (FPredDayOfWeek: Word; FPredDayIndex: Word);
   end;
 
   { Pointer to a relative day }
@@ -319,14 +446,106 @@ type
     FAliasTo: PZone; { Pointer to aliased zone }
   end;
 
-  {$I TZDB.inc}
+{$INCLUDE 'TZDB.inc'}
 
-function EncodeDateMonthLastDayOfWeek(const AYear, AMonth, ADayOfWeek: Word): TDateTime;
+const
+  CNullDateTime = -DateDelta;
+
+function DateTimeToPreciseTime(const ADateTime: TDateTime): TPreciseTime; inline;
+var
+  D, MS: Int64;
+begin
+  D := Round(ADateTime * MSecsPerDay);
+  MS := D div MSecsPerDay;
+  Result := ((DateDelta + MS) * MSecsPerDay) + (Abs(D) mod MSecsPerDay);
+end;
+
+function PreciseTimeToDateTime(const APreciseTime: TPreciseTime): TDateTime; inline;
+var
+  D, MS: Int64;
+begin
+  D := (Int64(PUInt64(@APreciseTime)^ div Cardinal(MSecsPerDay)) - DateDelta) * MSecsPerDay;
+  MS := Int64(PUInt64(@APreciseTime)^ mod Cardinal(MSecsPerDay));
+
+  if D < 0 then
+    MS := -MS;
+
+  Result := (D + MS) / MSecsPerDay;
+end;
+
+function PreciseTimeToStr(const APreciseTime: TPreciseTime): string; inline;
+begin
+  Result := FormatDateTime('yyyy-MM-dd hh:mm:ss.zzz', PreciseTimeToDateTime(APreciseTime));
+end;
+
+function IncMillisecond(const APreciseTime: TPreciseTime; const AMilliseconds: Int64): TPreciseTime; inline;
+begin
+  Result := APreciseTime + AMilliseconds;
+end;
+
+function IncSecond(const APreciseTime: TPreciseTime; const ASeconds: Int64): TPreciseTime; inline;
+begin
+  Result := IncMillisecond(APreciseTime, ASeconds * 1000);
+end;
+
+function IncMinute(const APreciseTime: TPreciseTime; const AMinutes: Int64): TPreciseTime; inline;
+begin
+  Result := IncSecond(APreciseTime, AMinutes * 60);
+end;
+
+function IncHour(const APreciseTime: TPreciseTime; const AHours: Int64): TPreciseTime; inline;
+begin
+  Result := IncMinute(APreciseTime, AHours * 60);
+end;
+
+function IncDay(const APreciseTime: TPreciseTime; const ADays: Int64): TPreciseTime; inline;
+begin
+  Result := IncHour(APreciseTime, ADays * 24);
+end;
+
+function IncWeek(const APreciseTime: TPreciseTime; const ADays: Int64): TPreciseTime; inline;
+begin
+  Result := IncDay(APreciseTime, ADays * 7);
+end;
+
+function EncodePreciseDate(const AYear, AMonth, ADay: Word): TPreciseTime; inline;
+begin
+  Result := DateTimeToPreciseTime(EncodeDate(AYear, AMonth, ADay));
+end;
+
+function DayOfTheWeek(const APreciseTime: TPreciseTime): Word; inline;
+begin
+  Result := DateUtils.DayOfTheWeek(PreciseTimeToDateTime(APreciseTime));
+end;
+
+function DayOf(const APreciseTime: TPreciseTime): Word; inline;
+begin
+  Result := DateUtils.DayOf(PreciseTimeToDateTime(APreciseTime));
+end;
+
+function MonthOf(const APreciseTime: TPreciseTime): Word; inline;
+begin
+  Result := DateUtils.MonthOf(PreciseTimeToDateTime(APreciseTime));
+end;
+
+function YearOf(const APreciseTime: TPreciseTime): Word; inline;
+begin
+  Result := DateUtils.YearOf(PreciseTimeToDateTime(APreciseTime));
+end;
+
+function ComparePreciseTime(const A, B: TPreciseTime): Integer; inline;
+begin
+  if A > B then Result := 1
+  else if A < B then Result := -1
+  else Result := 0;
+end;
+
+function EncodeDateMonthLastDayOfWeek(const AYear, AMonth, ADayOfWeek: Word): TPreciseTime;
 var
   LDoW: Word;
 begin
   { Generate a date that looks like: Year/Month/(Last Day of Month) }
-  Result := EncodeDate(AYear, AMonth, DaysInAMonth(AYear, AMonth));
+  Result := EncodePreciseDate(AYear, AMonth, DaysInAMonth(AYear, AMonth));
 
   { Get the day of week for this newly crafted date }
   LDoW := DayOfTheWeek(Result);
@@ -338,12 +557,12 @@ begin
     Result := IncDay(Result, -1 * (DaysPerWeek - ADayOfWeek + LDoW));
 end;
 
-function EncodeDateMonthFirstDayOfWeek(const AYear, AMonth, ADayOfWeek: Word): TDateTime;
+function EncodeDateMonthFirstDayOfWeek(const AYear, AMonth, ADayOfWeek: Word): TPreciseTime;
 var
   LDoW: Word;
 begin
   { Generate a date that looks like: Year/Month/1st }
-  Result := EncodeDate(AYear, AMonth, 1);
+  Result := EncodePreciseDate(AYear, AMonth, 1);
 
   { Get the day of week for this newly crafted date }
   LDoW := DayOfTheWeek(Result);
@@ -355,7 +574,7 @@ begin
     Result := IncDay(Result, ADayOfWeek - LDoW);
 end;
 
-function EncodeDateMonthFirstDayOfWeekAfter(const AYear, AMonth, ADayOfWeek, AAfter: Word): TDateTime;
+function EncodeDateMonthFirstDayOfWeekAfter(const AYear, AMonth, ADayOfWeek, AAfter: Word): TPreciseTime;
 begin
   { Generate a date with the given day of week as first in month }
   Result := EncodeDateMonthFirstDayOfWeek(AYear, AMonth, ADayOfWeek);
@@ -363,7 +582,7 @@ begin
   { Iterate until we've surpassed our min requirement }
   while DayOf(Result) < AAfter do
   begin
-    Result := IncWeek(Result);
+    Result := IncWeek(Result, 1);
 
     { Safe-guard! If we've gotten to another month, get back a week and stop. }
     if MonthOf(Result) <> AMonth then
@@ -374,387 +593,627 @@ begin
   end;
 end;
 
-function RelativeToDateTime(const AYear, AMonth: Word; const ARelativeDay: PRelativeDay; const ATimeOfDay: Int64): TDateTime;
+function EncodeDateMonthFirstDayOfWeekBefore(const AYear, AMonth, ADayOfWeek, ABefore: Word): TPreciseTime;
+var
+  LWeekDayDiff : Integer;
+begin
+  { Generate a date with ABefore as the Day in AMonth and AYear }
+  Result := EncodePreciseDate(AYear, AMonth, ABefore);
+
+  { Adjust Date by difference in DayOfWeek of Date and ADayOfWeek.  If that difference is negative subtract a week. }
+  LWeekDayDiff := DayOfTheWeek(Result) - ADayOfWeek;
+  if LWeekDayDiff > 0 then
+    Result := IncDay(Result, -LWeekDayDiff)
+  else if LWeekDayDiff < 0 then
+    Result := IncDay(Result, - (LWeekDayDiff + 7));
+end;
+
+function RelativeToPreciseTime(const AYear, AMonth: Word; const ARelativeDay: PRelativeDay;
+  const ATimeOfDay: Int64): TPreciseTime;
 begin
   Result := 0;
 
   { Special case - if there is no day defined then there is no time also. Exit with only the date part. }
   if ARelativeDay = nil then
-    Result := EncodeDate(AYear, AMonth, 1)
+    Result := EncodePreciseDate(AYear, AMonth, 1)
   else if ARelativeDay^.FDayType = dtFixed then
-    Result := EncodeDate(AYear, AMonth, ARelativeDay^.FFixedDay)
+    Result := EncodePreciseDate(AYear, AMonth, ARelativeDay^.FFixedDay)
   else if ARelativeDay^.FDayType = dtLastOfMonth then
     Result := EncodeDateMonthLastDayOfWeek(AYear, AMonth, ARelativeDay^.FLastDayOfWeek)
-  else if ARelativeDay^.FDayType = tdNthOfMonth then
-    Result := EncodeDateMonthFirstDayOfWeekAfter(AYear, AMonth, ARelativeDay^.FNthDayOfWeek, ARelativeDay^.FDayIndex);
+  else if ARelativeDay^.FDayType = dtNthOfMonth then
+    Result := EncodeDateMonthFirstDayOfWeekAfter(AYear, AMonth, ARelativeDay^.FNthDayOfWeek, ARelativeDay^.FNthDayIndex)
+  else if ARelativeDay^.FDayType = dtPredOfMonth then
+    Result := EncodeDateMonthFirstDayOfWeekBefore(AYear, AMonth, ARelativeDay^.FPredDayOfWeek, ARelativeDay^.FPredDayIndex);
 
   { Attach the time part now }
   Result := IncSecond(Result, ATimeOfDay);
 end;
 
-function FormatAbbreviation(const APeriod: PPeriod; const ARule: PRule): string;
+function FormatAbbreviation(const APeriod: PPeriod; const ARule: PRule;
+  const ALocalTimeType: TLocalTimeType): string;
+var
+  LDelimIndex: Integer;
 begin
-  if Pos('%s', APeriod^.FFmtStr) > 0 then
+
+{
+  From IANA TZDB  https://data.iana.org/time-zones/tz-how-to.html
+
+  The FORMAT column specifies the usual abbreviation of the time zone name. It can have one of three forms:
+    * A string of three or more characters that are either ASCII alphanumerics, \93+\94, or \93-\94, in which case that\92s the abbreviation.
+    * A pair of strings separated by a slash (\91/\92), in which case the first string is the abbreviation for the standard
+      time name and the second string is the abbreviation for the daylight saving time name.
+    * A string containing \93%s,\94 in which case the \93%s\94 will be replaced by the text in the appropriate Rule\92s LETTER column.
+}
+  LDelimIndex := Pos('/', APeriod^.FFmtStr);
+  if LDelimIndex > 0 then
+  begin
+    case ALocalTimeType of
+      lttStandard: Result := Copy(APeriod^.FFmtStr, 1, LDelimIndex - 1);
+      lttDaylight: Result := Copy(APeriod^.FFmtStr, LDelimIndex + 1, Length(APeriod^.FFmtStr));
+    end;
+  end
+  else if Pos('%s', APeriod^.FFmtStr) > 0 then
   begin
     { There is a place holder in the format string. Replace if with the current letter in the rule }
     if ARule <> nil then
       Result := Format(APeriod^.FFmtStr, [ARule^.FFmtPart])
     else
       Result := Format(APeriod^.FFmtStr, ['']);
-
     { In case no rule is defined, replace the placeholder with an empty string }
   end else
     Result := APeriod^.FFmtStr;
 end;
 
 type
-  { Contains a compiled rule }
-  TCompiledRule = class
-  private
-    FRule: PRule;
-    FStartsOn: TDateTime;
-    FOffset: Int64;
-    FNext, FPrev: TCompiledRule;
-
-  public
-    constructor Create(const ARule: PRule; const AStartsOn: TDateTime;
-      const AOffset: Int64);
-
-    function GetLocalTimeType(const ADateTime: TDateTime): TLocalTimeType;
-  end;
-
-  { Contains a compiled period (easier for lookup) }
-  TCompiledPeriod = class
-  private
+  { Stored the data for an "observed rule" which is either a rule or a rule-less segment of a year. }
+  TObservedRule = record
     FPeriod: PPeriod;
-    FFrom, FUntil: TDateTime;
+    FRule: PRule;
+    FStartsOn: TPreciseTime;
+    FYear: Word;
+    FNegDst: Boolean;
 
-{$IFNDEF SUPPORTS_MONITOR}
-    FRulesByYearLock: TCriticalSection;
+    function Bias: Int64; inline;
+    function UtcOffset: Int64; inline;
+
+{$IFDEF FPC}
+    class operator Equal(const A, B: TObservedRule): Boolean;
 {$ENDIF}
-    { Year -> List of Rules for that year }
-    FRulesByYear: TBucketList;  { Word, TList<TCompiledRule> }
-
-    { Obtain the last rule that is active in a given year }
-    function GetLastRuleForYear(const AYear: Word): PRule;
-
-    { Compiles the Rules for a given year }
-    function CompileRulesForYear(const AYear: Word): TList;  { TCompiledRule }
-  public
-    { Basic stuffs }
-    constructor Create(const APeriod: PPeriod; const AFrom, AUntil: TDateTime);
-    destructor Destroy(); override;
-
-    { Finds a matching rule }
-    function FindMatchingRule(const ADateTime: TDateTime): TCompiledRule;
   end;
 
-var
-{$IFNDEF SUPPORTS_MONITOR}
-  FTimeZoneCacheLock: TCriticalSection;
+{$IFDEF FPC}
+  class operator TObservedRule.Equal(const A, B: TObservedRule): Boolean;
+  begin
+    Result :=
+      (A.FPeriod = B.FPeriod) and
+      (A.FRule = B.FRule) and
+      (A.FStartsOn = B.FStartsOn) and
+      (A.FYear = B.FYear) and
+      (A.FNegDst = B.FNegDst);
+  end;
 {$ENDIF}
-  FTimeZoneCache: TStringList; { <String, TBundledTimeZone> }
 
-function CompiledPeriodComparison(ALeft, ARight: Pointer): Integer;
-begin
-  { Use standard DT comparison operation }
-  Result := CompareDateTime(TCompiledPeriod(ALeft).FUntil,
-    TCompiledPeriod(ARight).FUntil);
-end;
+  function TObservedRule.Bias: Int64;
+  begin
+    if FRule <> nil then
+      Result := FRule^.FOffset
+    else
+      Result := 0;
+  end;
 
-function CompiledRuleComparison(ALeft, ARight: Pointer): Integer;
-begin
-  { Use standard DT comparison operation }
-  Result := CompareDateTime(TCompiledRule(ALeft).FStartsOn,
-    TCompiledRule(ARight).FStartsOn);
-end;
+  function TObservedRule.UtcOffset: Int64;
+  begin
+    Result := FPeriod^.FOffset + Bias;
+  end;
 
-procedure ForEachYearlyRule(AInfo, AItem, AData: Pointer; out AContinue: Boolean);
-begin
-  { Free the value list }
-  TList(AData).Free;
-  AContinue := True;
-end;
+type
+  TObservedRuleArray = array of TObservedRule;
+  TPRuleArray = array of PRule;
+  PPRuleAndYear = ^TPRuleAndYear;
+  TPRuleAndYear = record
+    FYear: Word;
+    FRule: PRule;
+{$IFDEF FPC}
+    class operator Equal(const ALeft, ARight: TPRuleAndYear): Boolean;
+{$ENDIF}
+  end;
 
-{ TCompiledPeriod }
+{$IFDEF FPC}
+  class operator TPRuleAndYear.Equal(const ALeft, ARight: TPRuleAndYear): Boolean;
+  begin
+    Result := (ALeft.FYear = ARight.FYear) and (ALeft.FRule = ARight.FRule);
+  end;
+{$ENDIF}
 
-function TCompiledPeriod.CompileRulesForYear(const AYear: Word): TList;
+function CompareRulesByStartTime(A, B: TPRuleAndYear): Integer; inline;
 var
-  LCurrRule: PYearBoundRule;
-  LLastYearRule: PRule;
-  LAbsolute: TDateTime;
-  I: Integer;
+  L, R: TPreciseTime;
 begin
-  { Initialize the compiled list }
-  Result := TObjectList.Create(true);
+  L := RelativeToPreciseTime(A.FYear, A.FRule^.FInMonth, A.FRule^.FOnDay, A.FRule^.FAt);
+  R := RelativeToPreciseTime(B.FYear, B.FRule^.FInMonth, B.FRule^.FOnDay, B.FRule^.FAt);
+  Result := ComparePreciseTime(L, R);
+end;
+
+function GetPeriodRulesForYear(const APeriod: PPeriod; const AYear: Word): TPRuleArray;
+var
+  LRule: PYearBoundRule;
+  I: Integer;
+  LRules: {$IFDEF DELPHI}TList{$ELSE}TFPGList{$ENDIF}<TPRuleAndYear>;
+{$IFDEF DELPHI}
+  LComparer: IComparer<TPRuleAndYear>;
+{$ENDIF}
+  LElem: TPRuleAndYear;
+begin
+  Result := nil;
 
   { Check whether we actually have a fule family attached }
-  if FPeriod^.FRuleFamily <> nil then
+  if APeriod^.FRuleFamily <> nil then
   begin
-    { Let's start with the last active rule from last year }
-    LLastYearRule := GetLastRuleForYear(AYear - 1);
+    LRules := {$IFDEF DELPHI}TList{$ELSE}TFPGList{$ENDIF}<TPRuleAndYear>.Create;
 
-    { Add the the last year rule since 1 jan 00:00 this year }
-    if LLastYearRule <> nil then
-      Result.Add(TCompiledRule.Create(LLastYearRule, EncodeDate(AYear, 1, 1), LLastYearRule^.FOffset));
-
-    { Obtain the first rule in chain }
-    LCurrRule := FPeriod^.FRuleFamily^.FFirstRule;
-
-    for I := 0 to FPeriod^.FRuleFamily^.FCount - 1 do
+    { Iterate over all rules in the period. }
+    LRule := APeriod^.FRuleFamily^.FFirstRule;
+    for I := 0 to APeriod^.FRuleFamily^.FCount - 1 do
     begin
-      { Check we're in the required year }
-      if (AYear >= LCurrRule^.FStart) and (AYear <= LCurrRule^.FEnd) then
+      if (AYear >= LRule^.FStart) and (AYear <= LRule^.FEnd) then
       begin
-        { Obtain the absolute date when the rule activates in this year }
-        LAbsolute := RelativeToDateTime(AYear,
-            LCurrRule^.FRule^.FInMonth, LCurrRule^.FRule^.FOnDay,
-            LCurrRule^.FRule^.FAt);
+        LElem.FYear := AYear;
+        LElem.FRule := LRule^.FRule;
 
-        { Adjust the value based on the specified time mode (do nothing for local mode) }
-        case LCurrRule^.FRule^.FAtMode of
-          trStandard:
-            { This value is specified in the currect period's statndard time. Add the rule offset to get to local time. }
-            LAbsolute := IncSecond(LAbsolute, LCurrRule^.FRule^.FOffset);
-
-          trUniversal:
-            { This value is specified in universal time. Add both the standard deviation plus the local time }
-            LAbsolute := IncSecond(LAbsolute, FPeriod^.FOffset + LCurrRule^.FRule^.FOffset);
-        end;
-
-        { Add the new compiled rule to the list }
-        Result.Add(TCompiledRule.Create(LCurrRule^.FRule, LAbsolute,
-            LCurrRule^.FRule^.FOffset));
+        LRules.Add(LElem);
       end;
 
       { Go to next rule }
-      Inc(LCurrRule);
+      Inc(LRule);
     end;
 
     { Sort the list ascending by the activation date/time }
-    Result.Sort(@CompiledRuleComparison);
-
-    { Create a linked list based on offsets and their nexts (will be used on type getting) }
-    for I := 0 to Result.Count - 1 do
-    begin
-      { Set N[I].Next -> N[I + 1] }
-      if I < (Result.Count - 1) then
-        TCompiledRule(Result[I]).FNext := TCompiledRule(Result[I + 1]);
-
-      { Set N[I].Prev -> N[I - 1] }
-      if I > 0 then
-        TCompiledRule(Result[I]).FPrev := TCompiledRule(Result[I - 1]);
-    end;
-  end;
-
-  { Register the new list into the dictionary }
-{$WARNINGS OFF}
-  FRulesByYear.Add(Pointer(AYear), Result);
-{$WARNINGS ON}
-end;
-
-constructor TCompiledPeriod.Create(const APeriod: PPeriod; const AFrom, AUntil: TDateTime);
-begin
-  FPeriod := APeriod;
-  FUntil := AUntil;
-  FFrom := AFrom;
-
-{$IFNDEF SUPPORTS_MONITOR}
-  FRulesByYearLock := TCriticalSection.Create;
-{$ENDIF}
-  FRulesByYear := TBucketList.Create();
-end;
-
-destructor TCompiledPeriod.Destroy;
-begin
-{$IFNDEF SUPPORTS_MONITOR}
-  FRulesByYearLock.Free;
-{$ENDIF}
-
-  { Free each rule }
-  if Assigned(FRulesByYear) then
-  begin
 {$IFDEF FPC}
-    FRulesByYear.ForEach(@ForEachYearlyRule);
+    LRules.Sort(@CompareRulesByStartTime);
 {$ELSE}
-    FRulesByYear.ForEach(ForEachYearlyRule);
+    LComparer := TComparer<TPRuleAndYear>.Construct(function(const A, B: TPRuleAndYear): Integer
+    begin
+      Result := CompareRulesByStartTime(A, B);
+    end);
+    LRules.Sort(LComparer);
 {$ENDIF}
 
-    FRulesByYear.Free;
-  end;
+    SetLength(Result, LRules.Count);
+    for I := 0 to LRules.Count - 1 do
+      Result[I] := LRules[I].FRule;
 
-  inherited;
+    LRules.Free;
+  end;
 end;
 
-function TCompiledPeriod.FindMatchingRule(const ADateTime: TDateTime): TCompiledRule;
+function GetObservedRulesForYear(const AZone: PZone; const AYear: Word): TObservedRuleArray;
 var
-  LYear: Word;
-  LCompiledList: TList;
-  I, LCompResult: Integer;
+  LPeriod: PPeriod;
+  LStart, LEnd: TPreciseTime;
+  LRules: TPRuleArray;
+  I, X, L: Integer;
+  Z: Int64;
+  PR: PRule;
+  LY1: {$IFDEF DELPHI}TList{$ELSE}TFPGList{$ENDIF}<TObservedRule>;
+  LYMinus1, LYPlus1, LR, LSk: TObservedRule;
 begin
-  Result := nil;
-  LYear := YearOf(ADateTime);
+  { Mark all intermediary data as un-initialized. <-- this is date ZERO which is the start point. }
+  LStart := DateTimeToPreciseTime(CNullDateTime);
 
-  { Protect this part of the code since it may change internal structures over time }
-{$IFDEF SUPPORTS_MONITOR}
-  MonitorEnter(FRulesByYear);
-{$ELSE}
-  FRulesByYearLock.Enter();
-{$ENDIF}
+  LYMinus1.FPeriod := nil;
+  LYPlus1.FPeriod := nil;
+
+  LY1 := {$IFDEF DELPHI}TList{$ELSE}TFPGList{$ENDIF}<TObservedRule>.Create;
   try
-{$WARNINGS OFF}
-    { Check if we have a cached list of matching rules for this date's year }
-    if not FRulesByYear.Find(Pointer(LYear), Pointer(LCompiledList)) then
-      LCompiledList := CompileRulesForYear(LYear);
-{$WARNINGS ON}
-
-    { Iterate over and search what we like. Do not stop on the first one obviously }
-    for I := 0 to LCompiledList.Count - 1 do
+    { Iterate over all periods in the zone. }
+    LPeriod := AZone^.FFirstPeriod;
+    for I := 0 to AZone^.FCount - 1 do
     begin
-      LCompResult := CompareDateTime(ADateTime,
-        TCompiledRule(LCompiledList[I]).FStartsOn);
+      { Calculate the end date of the period }
+      LEnd := RelativeToPreciseTime(
+        LPeriod^.FUntilYear, LPeriod^.FUntilMonth, LPeriod^.FUntilDay, LPeriod^.FUntilTime);
 
-      if LCompResult >= 0 then
-        Result := TCompiledRule(LCompiledList[I]);
+      { Try to get the last rule for the period (needed to calculate boundary) }
+      LRules := GetPeriodRulesForYear(LPeriod, LPeriod^.FUntilYear);
+      if LPeriod^.FUntilDay <> nil then
+      begin
+        { Adjust the end of the period according to the last rule in it. }
+        if Length(LRules) > 0 then
+          Z := LRules[Length(LRules) - 1]^.FOffset
+        else
+          Z := 0;
+
+        case LPeriod^.FUntilTimeMode of
+          trStandard:
+            LEnd := IncSecond(LEnd, Z);
+          trUniversal:
+            LEnd := IncSecond(LEnd, LPeriod^.FOffset + Z);
+        end;
+      end;
+
+      { Extract the last millisecond in the end to mark the end of the period. }
+      LEnd := IncMilliSecond(LEnd, -1);
+
+      { Collect last rule of the previous year. }
+      if (YearOf(LStart) <= AYear - 1) and (YearOf(LEnd) >= AYear - 1) then
+      begin
+        { Load the rules for previous year. }
+        LRules := GetPeriodRulesForYear(LPeriod, AYear - 1);
+
+        LYMinus1.FPeriod := LPeriod;
+        LYMinus1.FStartsOn := LStart;
+        LYMinus1.FYear := AYear - 1;
+        LYMinus1.FNegDst := false;
+
+        if Length(LRules) > 0 then
+        begin
+          LYMinus1.FRule := LRules[Length(LRules) - 1];
+
+          { Determine the DST sign in period. }
+          for PR in LRules do
+            if PR^.FOffset < 0 then begin LYMinus1.FNegDst := true; break; end;
+        end else
+          LYMinus1.FRule := nil;
+      end;
+
+      { Collect first rule of the next year. }
+      if (YearOf(LStart) <= AYear + 1) and (YearOf(LEnd) >= AYear + 1) and (LYPlus1.FPeriod = nil) then
+      begin
+        { Load the rules for following year. }
+        LRules := GetPeriodRulesForYear(LPeriod, AYear + 1);
+
+        LYPlus1.FPeriod := LPeriod;
+        LYPlus1.FStartsOn := LStart;
+        LYPlus1.FYear := AYear + 1;
+        LYPlus1.FNegDst := false;
+
+        if Length(LRules) > 0 then
+        begin
+          LYPlus1.FRule := LRules[0];
+
+          { Determine the DST sign in period. }
+          for PR in LRules do
+            if PR^.FOffset < 0 then begin LYPlus1.FNegDst := true; break; end;
+        end else
+          LYPlus1.FRule := nil;
+      end;
+
+      { Collect all the rules for the year we're looking for. }
+      if (YearOf(LStart) <= AYear) and (YearOf(LEnd) >= AYear) then
+      begin
+        { Load the rules for this year. }
+        LRules := GetPeriodRulesForYear(LPeriod, AYear);
+
+        LR.FPeriod := LPeriod;
+        LR.FStartsOn := LStart;
+        LR.FYear := AYear;
+        LR.FNegDst := false;
+
+        { Determine the DST sign in period. }
+        for PR in LRules do
+          if PR^.FOffset < 0 then begin LR.FNegDst := true; break; end;
+
+        if Length(LRules) > 0 then
+        begin
+          { Pump all the rules in }
+          for X := 0 to Length(LRules) - 1 do
+          begin
+            LR.FRule := LRules[X];
+            LY1.Add(LR);
+          end;
+        end else
+        begin
+          { No rules available for this period/year. Still have to add something to indicate that. }
+          LR.FRule := nil;
+          LY1.Add(LR);
+        end;
+      end;
+
+      { Update the start of the next period as the end of the current one and iterate next. }
+      LStart := IncMillisecond(LEnd, 1);
+      Inc(LPeriod);
     end;
+
+    { Add the extra rules from prev and next years into the list }
+    if LYMinus1.FPeriod <> nil then
+      LY1.Insert(0, LYMinus1);
+    if LYPlus1.FPeriod <> nil then
+      LY1.Add(LYPlus1);
+
+    { Re-calculate the start dates now and moveto result. }
+    SetLength(Result, LY1.Count);
+
+    L := 0;
+    LSk.FPeriod := nil;
+
+    for I := 0 to LY1.Count - 1 do
+    begin
+      LR := LY1[I];
+      LStart := LR.FStartsOn;
+
+      if LR.FRule <> nil then
+      begin
+        { This is an actual rule, we can calculate the start time properly based on its' data }
+        LR.FStartsOn := RelativeToPreciseTime(LR.FYear, LR.FRule^.FInMonth, LR.FRule^.FOnDay, LR.FRule^.FAt);
+        if LR.FRule^.FOnDay <> nil then
+        begin
+          case LR.FRule^.FAtMode of
+            trStandard:
+            begin
+              if (I > 0) and (LY1[I - 1].FRule <> nil) then
+                LR.FStartsOn := IncSecond(LR.FStartsOn, LY1[I - 1].FRule^.FOffset);
+            end;
+            trUniversal:
+            begin
+              if I > 0 then
+              begin
+                { Adjust to local time based on previous rule }
+                LR.FStartsOn := IncSecond(LR.FStartsOn, LY1[I - 1].FPeriod^.FOffset);
+                if LY1[I - 1].FRule <> nil then
+                  LR.FStartsOn := IncSecond(LR.FStartsOn, LY1[I - 1].FRule^.FOffset);
+              end;
+            end;
+          end;
+        end;
+      end
+      else
+      begin
+        { This is not technically a rule - just naked segment. We'll need to infer data. }
+        if YearOf(LR.FStartsOn) < LR.FYear then
+          LR.FStartsOn := EncodePreciseDate(LR.FYear, 1, 1);
+      end;
+
+      { Very special case in here. Need suppress overlapping rules form different periods but same rule family.
+        Also important to preserve the last overlapping rule as the last active on in the new period. }
+      if ComparePreciseTime(LStart, LR.FStartsOn) <= 0 then
+      begin
+        if (LSk.FPeriod <> nil) and
+          ((LSk.FPeriod <> LR.FPeriod) or (LSk.FYear <> LR.FYear)) then
+          begin
+            { The last skipped rule is the last one in the period/year. Assume that is still active }
+            Result[L] := LSk;
+            Inc(L);
+          end;
+
+        { Save the current rule as well. }
+        Result[L] := LR;
+        Inc(L);
+
+        LSk.FPeriod := nil;
+      end else
+      begin
+        { Save last skipped rule and reset its start to the start of its period. }
+        LSk := LR;
+        LSk.FStartsOn := LStart;
+      end;
+
+    end;
+
+    SetLength(Result, L);
   finally
-{$IFDEF SUPPORTS_MONITOR}
-    MonitorExit(FRulesByYear);
-{$ELSE}
-    FRulesByYearLock.Leave();
-{$ENDIF}
+    LY1.Free;
   end;
 end;
 
-function TCompiledPeriod.GetLastRuleForYear(const AYear: Word): PRule;
+function BreakdownYearIntoSegments(const AZone: PZone; const AYear: Word): TYearSegmentArray;
 var
-  LCurrRule: PYearBoundRule;
-  LAbsolute, LBestChoice: TDateTime;
-  I: Integer;
+  X, Z: Integer;
+  LSegment: TYearSegment;
+  LObsRules: TObservedRuleArray;
+  LRule, LNextRule: TObservedRule;
+  LEnd: TPreciseTime;
+  LCarryDelta, LDelta: Int64;
+  LSegments: {$IFDEF DELPHI}TList{$ELSE}TFPGList{$ENDIF}<TYearSegment>;
+  LYStart, LYEnd: TPreciseTime;
 begin
-  { Default to nothing obviously }
   Result := nil;
+  LCarryDelta := 0;
 
-  { Check whether we actually have a fule family attached }
-  if FPeriod^.FRuleFamily = nil then
-    exit;
+  LSegments := {$IFDEF DELPHI}TList{$ELSE}TFPGList{$ENDIF}<TYearSegment>.Create;
+  try
+    { Get all rules that intersect this year in some way (this means some rules from Year +- 1 will apply) }
+    LObsRules := GetObservedRulesForYear(AZone, AYear);
 
-  { Obtain the first rule in chain }
-  LCurrRule := FPeriod^.FRuleFamily^.FFirstRule;
-  LBestChoice := 0;
-
-  for I := 0 to FPeriod^.FRuleFamily^.FCount - 1 do
-  begin
-    { Check we're in the required year }
-    if (AYear >= LCurrRule^.FStart) and (AYear <= LCurrRule^.FEnd) then
+    for X := 0 to Length(LObsRules) - 1 do
     begin
-      { Obtain the absolute date when the rule activates in this year }
-      LAbsolute := RelativeToDateTime(AYear, LCurrRule^.FRule^.FInMonth,
-        LCurrRule^.FRule^.FOnDay, LCurrRule^.FRule^.FAt);
+      { Get current rule and next rule. Both are used to calculate things. }
+      LRule := LObsRules[X];
+      if X < Length(LObsRules) - 1 then
+        LNextRule := LObsRules[X + 1]
+      else
+        LNextRule.FPeriod := nil;
 
-      { Select this rule if it's better suited }
-      if CompareDateTime(LAbsolute, LBestChoice) >= 0 then
+      { Fill in standard details. }
+      LSegment.FPeriodOffset := LRule.FPeriod^.FOffset;
+      LSegment.FBias := LRule.Bias;
+
+      if not LRule.FNegDst then
       begin
-        LBestChoice := LAbsolute;
-        Result := LCurrRule^.FRule;
+        { 99.9% of zone have positive, normal DST offsets }
+        if LSegment.FBias > 0 then
+          LSegment.FType := lttDaylight
+        else
+          LSegment.FType := lttStandard;
+
+        LSegment.FName := FormatAbbreviation(LRule.FPeriod, LRule.FRule, LSegment.FType);
+      end else
+      begin
+        { For the rest we have to invert the logic }
+        if LSegment.FBias < 0 then
+        begin
+          LSegment.FType := lttStandard;
+          LSegment.FName := FormatAbbreviation(LRule.FPeriod, LRule.FRule, lttDaylight);
+        end else
+        begin
+          LSegment.FType := lttDaylight;
+          LSegment.FName := FormatAbbreviation(LRule.FPeriod, LRule.FRule, lttStandard);
+        end;
+      end;
+
+      LSegment.FStartsAt := IncSecond(LRule.FStartsOn, LCarryDelta);
+
+      { If there is another rule following, calculate the boundary and introduce the invalid/ambiguous regions. }
+      if LNextRule.FPeriod <> nil then
+      begin
+        { Calculate the overall delta between two segments. }
+        LDelta := LNextRule.UtcOffset - LRule.UtcOffset;
+
+        { Add the core segment. }
+        if LDelta < 0 then
+        begin
+          LCarryDelta := 0;
+          LEnd := IncSecond(LNextRule.FStartsOn, LDelta);
+        end else
+        begin
+          LCarryDelta := LDelta;
+          LEnd := LNextRule.FStartsOn;
+        end;
+
+        LSegment.FEndsAt := IncMillisecond(LEnd, -1);
+        LSegments.Add(LSegment);
+
+        if LDelta > 0 then
+        begin
+          { This is a positive bias. This means we have an invalid region. }
+          LSegment.FType := lttInvalid;
+          LSegment.FBias := 0;
+          LSegment.FStartsAt := LEnd;
+          LSegment.FEndsAt := IncMillisecond(IncSecond(LSegment.FStartsAt, LDelta), -1);
+          LSegments.Add(LSegment);
+        end
+        else if LDelta < 0 then
+        begin
+          { This is a negative bias. This means we have an ambiguous region. }
+          LSegment.FType := lttAmbiguous;
+          LSegment.FStartsAt := LEnd;
+          LSegment.FEndsAt := IncMillisecond(IncSecond(LSegment.FStartsAt, -LDelta), -1);
+          LSegments.Add(LSegment);
+        end;
+      end else
+      begin
+        { Just a placeholder of "to the end of time". }
+        LSegment.FEndsAt := IncMilliSecond(EncodePreciseDate(LRule.FYear + 1, 1, 1), -1);
+        LSegments.Add(LSegment);
       end;
     end;
 
-    { Go to next rule }
-    Inc(LCurrRule);
+    { Finalize the wortk by clipping the boundaries. }
+    LYStart := EncodePreciseDate(AYear, 1, 1);
+    LYEnd := IncMilliSecond(EncodePreciseDate(AYear + 1, 1, 1), -1);
+
+    SetLength(Result, LSegments.Count);
+    Z := 0;
+    for X := 0 to LSegments.Count - 1 do
+    begin
+      LSegment := LSegments[X];
+
+      if ComparePreciseTime(LSegment.FEndsAt, LYStart) < 0 then
+        continue;
+      if ComparePreciseTime(LSegment.FStartsAt, LYEnd) > 0 then
+        break;
+      if ComparePreciseTime(LSegment.FStartsAt, LYStart) < 0 then
+        LSegment.FStartsAt := LYStart;
+      if ComparePreciseTime(LSegment.FEndsAt, LYEnd) > 0 then
+        LSegment.FEndsAt := LYEnd;
+
+      Result[Z] := LSegment;
+      Inc(Z);
+    end;
+
+    SetLength(Result, Z);
+  finally
+    LSegments.Free;
   end;
 end;
 
-{ TCompiledRule }
+var
+{$IFNDEF DELPHI}
+  FTimeZoneCacheLock: TCriticalSection;
+{$ENDIF}
+  FTimeZoneCache: {$IFDEF DELPHI}TDictionary{$ELSE}TFPGMap{$ENDIF}<string, TBundledTimeZone>;
 
-constructor TCompiledRule.Create(const ARule: PRule;
-  const AStartsOn: TDateTime; const AOffset: Int64);
+{ TYearSegment }
+
+function TYearSegment.GetEndsAt: TDateTime;
 begin
-  FRule := ARule;
-  FStartsOn := AStartsOn;
-  FOffset := AOffset;
+  Result := PreciseTimeToDateTime(FEndsAt);
 end;
 
-function TCompiledRule.GetLocalTimeType(const ADateTime: TDateTime): TLocalTimeType;
+function TYearSegment.GetStartsAt: TDateTime;
 begin
-  { Try with the ending of the rule }
-  if (FNext <> nil) and (FNext.FOffset > FOffset) and
-     (CompareDateTime(ADateTime, IncSecond(FNext.FStartsOn, FOffset - FNext.FOffset)) >= 0) then
-     Result := lttInvalid
-  else if (FPrev = nil) and (FOffset < 0) and
-       (CompareDateTime(ADateTime, IncSecond(FStartsOn, -FOffset)) < 0) then
-       Result := lttAmbiguous
-  else if (FPrev <> nil) and (FPrev.FOffset > FOffset) and
-     (CompareDateTime(ADateTime, IncSecond(FStartsOn, FPrev.FOffset - FOffset)) < 0) then
-       Result := lttAmbiguous
-  else if FOffset <> 0 then
-      Result := lttDaylight
-  else
-    Result := lttStandard;
+  Result := PreciseTimeToDateTime(FStartsAt);
 end;
+
+function TYearSegment.GetUtcOffset: {$IFDEF DELPHI}TTimeSpan{$ELSE}Int64{$ENDIF};
+begin
+  Result := {$IFDEF DELPHI}TTimeSpan.FromSeconds(FPeriodOffset + FBias){$ELSE}FPeriodOffset + FBias{$ENDIF};
+end;
+
+{$IFDEF FPC}
+class operator TYearSegment.Equal(const ALeft, ARight: TYearSegment): Boolean;
+begin
+  Result :=
+    (ALeft.FStartsAt = ARight.FStartsAt) and
+    (ALeft.FEndsAt = ARight.FEndsAt) and
+    (ALeft.FType = ARight.FType) and
+    (ALeft.FName = ARight.FName) and
+    (ALeft.FPeriodOffset = ARight.FPeriodOffset) and
+    (ALeft.FBias = ARight.FBias);
+end;
+{$ENDIF}
 
 { TBundledTimeZone }
 
-procedure TBundledTimeZone.CompilePeriods;
+function TBundledTimeZone.AmbiguousTimeEnd(const AYear: word): TDateTime;
 var
-  LCompiledPeriod: TCompiledPeriod;
-  LCurrentPeriod: PPeriod;
-  LStart: TDateTime;
-  LAbsolute: TDateTime;
-  LRule: PRule;
-  I: Integer;
+  LSegment: TYearSegment;
 begin
-  LCurrentPeriod := PZone(FZone)^.FFirstPeriod;
-  LStart := 0;
+  if TryFindSegment(AYear, lttAmbiguous, false, LSegment) then
+    Result := LSegment.EndsAt
+  else
+    Result := CNullDateTime;
+end;
 
-  for I := 0 to PZone(FZone)^.FCount - 1 do
-  begin
-    { Calculate the end date }
-    LAbsolute := RelativeToDateTime(LCurrentPeriod^.FUntilYear,
-        LCurrentPeriod^.FUntilMonth, LCurrentPeriod^.FUntilDay,
-        LCurrentPeriod^.FUntilTime);
+function TBundledTimeZone.AmbiguousTimeStart(const AYear: word): TDateTime;
+var
+  LSegment: TYearSegment;
+begin
+  if TryFindSegment(AYear, lttAmbiguous, true, LSegment) then
+    Result := LSegment.StartsAt
+  else
+    Result := CNullDateTime;
+end;
 
-    { Set the approperiate values }
-    LCompiledPeriod := TCompiledPeriod.Create(LCurrentPeriod, LStart, LAbsolute);
+function TBundledTimeZone.InvalidTimeEnd(const AYear: word): TDateTime;
+var
+  LSegment: TYearSegment;
+begin
+  if TryFindSegment(AYear, lttInvalid, false, LSegment) then
+    Result := LSegment.EndsAt
+  else
+    Result := CNullDateTime;
+end;
 
-    { Get the last rule defined in the period }
-    if LCurrentPeriod^.FUntilDay <> nil then
-    begin
-      LRule := LCompiledPeriod.GetLastRuleForYear(LCurrentPeriod^.FUntilYear);
-
-      if LRule <> nil then
-      begin
-        { Adjust the value based on the specified time mode (do nothing for local mode) }
-        case LCurrentPeriod^.FUntilTimeMode of
-          trStandard:
-            { The period uses its standard time. Adjust to it }
-            LCompiledPeriod.FUntil := IncSecond(LAbsolute, LRule^.FOffset);
-
-          trUniversal:
-            { This value is specified in universal time. Add both the standard deviation plus the local time }
-            LCompiledPeriod.FUntil := IncSecond(LAbsolute, LCurrentPeriod^.FOffset + LRule^.FOffset);
-        end;
-      end;
-    end;
-
-    { Put the compiled period to a list }
-    FPeriods.Add(LCompiledPeriod);
-
-    { Set the last "until" }
-    LStart := LCompiledPeriod.FUntil;
-
-    { Move to the next period in the zone }
-    Inc(LCurrentPeriod);
-  end;
-
-  { Sort the list ascending }
-  FPeriods.Sort(@CompiledPeriodComparison);
+function TBundledTimeZone.InvalidTimeStart(const AYear: word): TDateTime;
+var
+  LSegment: TYearSegment;
+begin
+  if TryFindSegment(AYear, lttInvalid, true, LSegment) then
+    Result := LSegment.StartsAt
+  else
+    Result := CNullDateTime;
 end;
 
 constructor TBundledTimeZone.Create(const ATimeZoneID: string);
 var
   LIndex: Integer;
 begin
+  FSegmentsByYear := {$IFDEF DELPHI}TDictionary{$ELSE}TFPGMap{$ENDIF}<Word, TYearSegmentArray>.Create;
+
+{$IFNDEF DELPHI}
+  FSegmentsByYearLock := TCriticalSection.Create;
+{$ENDIF}
+
   { First, search in the CZones array }
   for LIndex := Low(CZones) to High(CZones) do
     if SameText(CZones[LIndex].FName, ATimeZoneID) then
@@ -775,47 +1234,76 @@ begin
   { Throw exception on error }
   if FZone = nil then
     raise ETimeZoneInvalid.CreateResFmt(@SNoBundledTZForName, [ATimeZoneID]);
+end;
 
-  { Initialize internals }
-  FPeriods := TObjectList.Create(true);
-  CompilePeriods();
+function TBundledTimeZone.DaylightTimeEnd(const AYear: Word): TDateTime;
+var
+  LSegment: TYearSegment;
+begin
+  if TryFindSegment(AYear, lttDaylight, true, LSegment) then
+    Result := LSegment.EndsAt
+  else
+    Result := CNullDateTime;
+end;
+
+function TBundledTimeZone.DaylightTimeStart(const AYear: word): TDateTime;
+var
+  LSegment: TYearSegment;
+begin
+  if TryFindSegment(AYear, lttDaylight, false, LSegment) then
+    Result := LSegment.StartsAt
+  else
+    Result := CNullDateTime;
+end;
+
+function TBundledTimeZone.ToISO8601Format(const ADateTime: TDateTime): string;
+const
+  CZFormat = '%.4d-%.2d-%.2d %.2d:%.2d:%.2d.%.3dZ';
+  CFullFormat = '%.4d-%.2d-%.2d %.2d:%.2d:%.2d.%.3d%s%.2d:%.2d';
+var
+  LSegment: TYearSegment;
+  LYear, LMonth, LDay, LHours, LMins, LSecs, LMillis: Word;
+  LBias, LBiasHours, LBiasMinutes: Int64;
+  LBiasSign: Char;
+begin
+  LSegment := GetSegmentUtc(DateUtils.YearOf(ADateTime), DateTimeToPreciseTime(ADateTime));
+  LBias := (LSegment.FPeriodOffset + LSegment.FBias) div SecsPerMin;
+
+  { Decode the local time (as we will include the bias into the repr.) }
+  DecodeDateTime(ADateTime, LYear, LMonth, LDay, LHours, LMins, LSecs, LMillis);
+
+  if LBias = 0 then
+    Result := Format(CZFormat, [LYear, LMonth, LDay, LHours, LMins, LSecs, LMillis])
+  else
+  begin
+    if (LBias >= 0) then LBiasSign := '+' else LBiasSign := '-';
+    LBiasHours := Abs(LBias) div MinsPerHour;
+    LBiasMinutes := Abs(LBias) mod MinsPerHour;
+
+    Result := Format(CFullFormat,
+      [LYear, LMonth, LDay, LHours, LMins, LSecs, LMillis, LBiasSign, LBiasHours, LBiasMinutes]);
+  end;
+end;
+
+procedure ForEachYearlySegment(AInfo, AItem, AData: Pointer; out AContinue: Boolean);
+begin
+  if AData <> nil then
+    SetLength(TYearSegmentArray(AData), 0);
+
+  AContinue := True;
 end;
 
 destructor TBundledTimeZone.Destroy;
 begin
-  FPeriods.Free;
+  { Free each rule }
+  if Assigned(FSegmentsByYear) then
+    FSegmentsByYear.Free;
+{$IFNDEF DELPHI}
+  FSegmentsByYearLock.Free;
+{$ENDIF}
+
   inherited;
 end;
-
-{$IFDEF SUPPORTS_TTIMEZONE}
-function TBundledTimeZone.DoGetDisplayName(const ADateTime: TDateTime; const ForceDaylight: Boolean): string;
-var
-  LOffset, LDstSave: Int64;
-  LTimeType: TLocalTimeType;
-  LStd, LDst: string;
-begin
-  { Call the mega-utility method }
-  GetTZData(ADateTime, LOffset, LDstSave, LTimeType, LStd, LDst);
-
-  { It's a bit unclear naming here. LStd is not always the standard name. It's the "standard output" string. LDst
-    only makes sense if the type of the local time if ambiguous. }
-  if (LTimeType = lttAmbiguous) and ForceDaylight then
-    Result := LDst
-  else
-    Result := LStd;
-end;
-
-procedure TBundledTimeZone.DoGetOffsetsAndType(
-  const ADateTime: TDateTime;
-  out AOffset, ADstSave: Int64;
-  out AType: TLocalTimeType);
-var
-  LDummy, LDummy2: string;
-begin
-  { Call the mega-utility method }
-  GetTZData(ADateTime, AOffset, ADstSave, AType, LDummy, LDummy2);
-end;
-{$ENDIF}
 
 function TBundledTimeZone.DoGetID: string;
 begin
@@ -823,7 +1311,6 @@ begin
   Result := PZone(FZone)^.FName;
 end;
 
-{$IFNDEF SUPPORTS_TTIMEZONE}
 function TBundledTimeZone.GetAbbreviation(const ADateTime: TDateTime; const AForceDaylight: Boolean): string;
 const
   CGMT = 'GMT';
@@ -838,10 +1325,13 @@ const
   end;
 
 var
+  LSegment: TYearSegment;
   LOffset, LHours, LMinutes, LSeconds: Int64;
 begin
   { Get the UTC offset for the given time. }
-  LOffset := GetUtcOffsetInternal(ADateTime, AForceDaylight);
+  LSegment := GetSegment(DateUtils.YearOf(ADateTime), DateTimeToPreciseTime(ADateTime),
+    AForceDaylight, false);
+  LOffset := LSegment.FPeriodOffset + LSegment.FBias;
 
   { Start with GMT }
   Result := CGMT;
@@ -852,7 +1342,8 @@ begin
 
   { Calculate the hh:mm:ss parts }
   LSeconds := Abs(LOffset);
-  LHours := LSeconds div (SecsPerMin * MinsPerHour); Dec(LSeconds, LHours * SecsPerMin * MinsPerHour);
+  LHours := LSeconds div (SecsPerMin * MinsPerHour);
+  Dec(LSeconds, LHours * SecsPerMin * MinsPerHour);
   LMinutes := LSeconds div SecsPerMin; Dec(LSeconds, LMinutes * SecsPerMin);
 
   { Add the sign }
@@ -881,68 +1372,29 @@ begin
   Result := GetDisplayName(Now);
 end;
 
-function TBundledTimeZone.GetCurrentUtcOffset: {$IFDEF SUPPORTS_TTIMESPAN}TTimeSpan{$ELSE}Int64{$ENDIF};
+function TBundledTimeZone.GetCurrentUtcOffset: {$IFDEF DELPHI}TTimeSpan{$ELSE}Int64{$ENDIF};
 begin
   { Call GetUtcOffset for current local time. }
   Result := GetUtcOffset(Now);
 end;
 
-function TBundledTimeZone.GetDisplayName(const ADateTime: TDateTime; const AForceDaylight: Boolean): string;
-var
-  LOffset, LDstSave: Int64;
-  LTimeType: TLocalTimeType;
-  LStd, LDst: string;
+function TBundledTimeZone.GetDisplayName(const ADateTime: TDateTime;
+  const AForceDaylight: Boolean): string;
 begin
-  { Call the mega-utility method }
-  GetTZData(ADateTime, LOffset, LDstSave, LTimeType, LStd, LDst);
-
-  { It's a bit unclear naming here. LStd is not always the standard name. It's the "standard output" string. LDst
-    only makes sense if the type of the local time if ambiguous. }
-  if LTimeType = lttInvalid then
-    raise ELocalTimeInvalid.CreateResFmt(@SInvalidLocalTime, [DateTimeToStr(ADateTime)])
-  else if (LTimeType = lttAmbiguous) and AForceDaylight then
-    Result := LDst
-  else
-    Result := LStd;
+  Result := GetSegment(DateUtils.YearOf(ADateTime), DateTimeToPreciseTime(ADateTime),
+    AForceDaylight, true).DisplayName;
 end;
 
 function TBundledTimeZone.GetLocalTimeType(const ADateTime: TDateTime): TLocalTimeType;
-var
-  LOffset, LDstSave: Int64; // Dummy
-  LStd, LDst: string;       // Dummy
 begin
-  { Call the mega-utility method }
-  GetTZData(ADateTime, LOffset, LDstSave, Result, LStd, LDst);
+  Result := GetSegment(DateUtils.YearOf(ADateTime),
+    DateTimeToPreciseTime(ADateTime), true, false).LocalType;
 end;
 
 function TBundledTimeZone.GetUtcOffset(const ADateTime: TDateTime; const AForceDaylight: Boolean):
-  {$IFDEF SUPPORTS_TTIMESPAN}TTimeSpan{$ELSE}Int64{$ENDIF};
+  {$IFDEF DELPHI}TTimeSpan{$ELSE}Int64{$ENDIF};
 begin
-{$IFDEF SUPPORTS_TTIMESPAN}
-  { Call the internal helper and generate a TTimeSpan out of it }
-  Result := TTimeSpan.FromSeconds(
-    GetUtcOffsetInternal(ADateTime, AForceDaylight)
-  );
-{$ELSE}
-  { Call internal method directly if no TTimeSpan is available }
-  Result := GetUtcOffsetInternal(ADateTime, AForceDaylight);
-{$ENDIF}
-end;
-
-function TBundledTimeZone.GetUtcOffsetInternal(const ADateTime: TDateTime; const ForceDaylight: Boolean): Int64;
-var
-  LDstSave: Int64;
-  LTimeType: TLocalTimeType;
-  LStd, LDst: string; // Dummy!
-begin
-  { Get all the expected data for this local time }
-  GetTZData(ADateTime, Result, LDstSave, LTimeType, LStd, LDst);
-
-  { And properly calculate teh offsets }
-  if (LTimeType = lttInvalid) then
-    raise ELocalTimeInvalid.CreateResFmt(@SInvalidLocalTime, [DateTimeToStr(ADateTime)])
-  else if (LTimeType = lttDaylight) or ((LTimeType = lttAmbiguous) and ForceDaylight) then
-    Inc(Result, LDSTSave);
+  Result := GetSegment(DateUtils.YearOf(ADateTime), DateTimeToPreciseTime(ADateTime), AForceDaylight, true).UtcOffset;
 end;
 
 function TBundledTimeZone.IsAmbiguousTime(const ADateTime: TDateTime): Boolean;
@@ -983,172 +1435,212 @@ end;
 
 function TBundledTimeZone.ToLocalTime(const ADateTime: TDateTime): TDateTime;
 var
-  LBias, LDstSave: Int64;
-  LTimeType: TLocalTimeType;
-  LStd, LDst: string; // Dummy!
-  LAdjusted: TDateTime;
+  LPreciseTime: TPreciseTime;
+  LSegment: TYearSegment;
 begin
-  { Get all the expected data for this UTC time. }
-  GetTZData(ADateTime, LBias, LDstSave, LTimeType, LStd, LDst);
+  LPreciseTime := DateTimeToPreciseTime(ADateTime);
+  LSegment := GetSegmentUtc(DateUtils.YearOf(ADateTime), LPreciseTime);
 
-  { Create a new date-time adjusted by the standard bias. Now, we might have landed into an
-    invalid yer period or an ambiguous year period. We will check for that and adjust properly. }
-  LAdjusted := IncSecond(ADateTime, LBias);
-
-  { Get all the expected data for the adjust UTC (now local) time. }
-  GetTZData(LAdjusted, LBias, LDstSave, LTimeType, LStd, LDst);
-
-  { If we have indeed landed into the 2 nasty periods, simply add the DST save so we can get into the safe zone. }
-  if (LTimeType = lttInvalid) or (LTimeType = lttDaylight) then
-    Result := IncSecond(LAdjusted, LDSTSave)
-  else
-    Result := LAdjusted;
+  LPreciseTime := IncSecond(LPreciseTime, LSegment.FPeriodOffset + LSegment.FBias);
+  Result := PreciseTimeToDateTime(LPreciseTime);
 end;
 
-function TBundledTimeZone.ToUniversalTime(const ADateTime: TDateTime; const AForceDaylight: Boolean): TDateTime;
-begin
-  { Very simple, get the UTC offset for the local time and decrement it to get to UTC }
-  Result := IncSecond(ADateTime,
-    -GetUtcOffsetInternal(ADateTime, AForceDaylight));
-end;
-{$ENDIF}
-
-function TBundledTimeZone.GetPeriodAndRule(const ADateTime: TDateTime; out APeriod: TObject; out ARule: TObject): Boolean;
+function TBundledTimeZone.ToUniversalTime(const ADateTime: TDateTime;
+  const AForceDaylight: Boolean): TDateTime;
 var
+  LPreciseTime: TPreciseTime;
+  LSegment: TYearSegment;
+begin
+  LPreciseTime := DateTimeToPreciseTime(ADateTime);
+  LSegment := GetSegment(DateUtils.YearOf(ADateTime), LPreciseTime, AForceDaylight, true);
+
+  LPreciseTime := IncSecond(LPreciseTime, -(LSegment.FPeriodOffset + LSegment.FBias));
+  Result := PreciseTimeToDateTime(LPreciseTime);
+end;
+
+function TBundledTimeZone.GetSegment(
+  const AYear: Word; const APreciseTime: TPreciseTime; const AForceDaylight: Boolean;
+  const AFailOnInvalid: Boolean): TYearSegment;
+var
+  LSegments: TYearSegmentArray;
   I: Integer;
 begin
-  { Defaults }
-  Result := false;
-  APeriod := nil;
-
-  { Got backwards. We probably are closer to present than past :P }
-  for I := FPeriods.Count - 1 downto 0 do
+  LSegments := GetYearBreakdown(AYear);
+  for I := Low(LSegments) to High(LSegments) do
   begin
-    APeriod := TObject(FPeriods[I]);
-
-    { Check that we're in this period }
-    if (CompareDateTime(ADateTime, TCompiledPeriod(APeriod).FFrom) >= 0) and
-      (CompareDateTime(ADateTime, TCompiledPeriod(APeriod).FUntil) < 0) then
+    if (ComparePreciseTime(LSegments[I].FStartsAt, APreciseTime) <= 0) and
+       (ComparePreciseTime(LSegments[I].FEndsAt, APreciseTime) >= 0) then
     begin
-      Result := true;
-      break;
+      { This segment matches our time }
+      if AFailOnInvalid and (LSegments[I].FType = lttInvalid) then
+        raise ELocalTimeInvalid.CreateResFmt(@SInvalidLocalTime, [PreciseTimeToStr(APreciseTime)]);
+
+      if not AForceDaylight and (LSegments[I].FType = lttAmbiguous) then
+      begin
+        { Requiring the next segment as part of the query. }
+        if (I < High(LSegments)) and (LSegments[I + 1].FType = lttStandard) then
+        begin
+          Result := LSegments[I];
+          Result.FName := LSegments[I + 1].FName;
+          Result.FBias := LSegments[I + 1].FBias;
+
+          Exit;
+        end;
+      end else
+        Exit(LSegments[I]);
     end;
   end;
 
-  { Exit if there is no period found. }
-  if not Result then
-    exit;
+  { Catch all issue. }
+  raise EUnknownTimeZoneYear.CreateResFmt(@SDateTimeNotResolvable,
+    [PreciseTimeToStr(APreciseTime), DoGetID()]);
+end;
 
-  { Find the rule that matches this period }
-  ARule := TCompiledPeriod(APeriod).FindMatchingRule(ADateTime);
+function TBundledTimeZone.GetSegmentUtc(const AYear: Word; const APreciseTime: TPreciseTime): TYearSegment;
+var
+  LSegment: TYearSegment;
+  LLocal: TPreciseTime;
+begin
+  for LSegment in GetYearBreakdown(AYear) do
+  begin
+
+    if LSegment.FType = lttAmbiguous then
+    begin
+      { Check with both period offset only }
+      LLocal := IncSecond(APreciseTime, LSegment.FPeriodOffset);
+
+      if YearOf(LLocal) <> AYear then
+      begin
+        { Crossed the year threshold. Pass on to next year. }
+        Exit(GetSegmentUtc(YearOf(LLocal), APreciseTime));
+      end;
+
+      if (ComparePreciseTime(LSegment.FStartsAt, LLocal) <= 0) and
+         (ComparePreciseTime(LSegment.FEndsAt, LLocal) >= 0) then
+         begin
+           { Special case when non-biased Ambiguous found - erase it. }
+           Result := LSegment;
+           Result.FBias := 0;
+           Exit;
+         end;
+    end;
+
+    if LSegment.FType <> lttInvalid then
+    begin
+      { Check for normal segments. }
+      LLocal := IncSecond(APreciseTime, LSegment.FPeriodOffset + LSegment.FBias);
+      if YearOf(LLocal) <> AYear then
+      begin
+        { Crossed the year threshold. Pass on to next year. }
+        Exit(GetSegmentUtc(YearOf(LLocal), APreciseTime));
+      end;
+
+      if (ComparePreciseTime(LSegment.FStartsAt, LLocal) <= 0) and
+         (ComparePreciseTime(LSegment.FEndsAt, LLocal) >= 0) then
+         Exit(LSegment);
+    end;
+
+  end;
+
+  { Catch all issue. }
+  raise EUnknownTimeZoneYear.CreateResFmt(@SDateTimeNotResolvable,
+    [PreciseTimeToStr(APreciseTime), DoGetID()]);
 end;
 
 class function TBundledTimeZone.GetTimeZone(const ATimeZoneID: string): TBundledTimeZone;
 var
-  LIndex: Integer;
+  LOut: TBundledTimeZone;
 begin
   { Access the cache }
-{$IFDEF SUPPORTS_MONITOR}
+{$IFDEF DELPHI}
   MonitorEnter(FTimeZoneCache);
 {$ELSE}
   FTimeZoneCacheLock.Enter();
 {$ENDIF}
   try
     { Check if we know this TZ }
-    LIndex := FTimeZoneCache.IndexOf(ATimeZoneID);
-
-    if LIndex = -1 then
+    if not FTimeZoneCache.{$IFNDEF FPC}TryGetValue{$ELSE}TryGetData{$ENDIF}(UpperCase(ATimeZoneID), Result) then
     begin
-      Result := TBundledTimeZone.Create(ATimeZoneID);
-
-      { Check for ID and not alias }
-      LIndex := FTimeZoneCache.IndexOf(Result.ID);
+      Result := TBundledTimeZone.Create(UpperCase(ATimeZoneID));
 
       { Check if maybe we used an alias and need to change things }
-      if LIndex > -1 then
+      if FTimeZoneCache.{$IFNDEF FPC}TryGetValue{$ELSE}TryGetData{$ENDIF}(UpperCase(Result.ID), LOut) then
       begin
         Result.Free;
-        Result := TBundledTimeZone(FTimeZoneCache.Objects[LIndex]);
+        Result := LOut;
       end else
-        FTimeZoneCache.AddObject(Result.ID, Result);
-
-    end else
-      Result := TBundledTimeZone(FTimeZoneCache.Objects[LIndex]);
-
+        FTimeZoneCache.Add(UpperCase(Result.ID), Result);
+    end;
   finally
-{$IFDEF SUPPORTS_MONITOR}
+{$IFDEF DELPHI}
   MonitorExit(FTimeZoneCache);
 {$ELSE}
-  FTimeZoneCacheLock.Leave();
+  FTimeZoneCacheLock.Leave;
 {$ENDIF}
   end;
 end;
 
-procedure TBundledTimeZone.GetTZData(
-  const ADateTime: TDateTime;
-  out AOffset, ADstSave: Int64;
-  out AType: TLocalTimeType;
-  out ADisplayName, ADstDisplayName: string);
-var
-  LPeriod: TCompiledPeriod;
-  LRule: TCompiledRule;
-  LPRule: PRule;
+class function TBundledTimeZone.GetTimezoneFromAlias(const AAliasID: string): string;
 begin
-  { Get period and rule }
-  if not GetPeriodAndRule(ADateTime, TObject(LPeriod), TObject(LRule)) then
-    raise ETimeZoneInvalid.CreateResFmt(@STimeZoneHasNoPeriod,
-      [DateTimeToStr(ADateTime), DoGetID()]);
-
-  { Go ahead baby }
-  AOffset := LPeriod.FPeriod^.FOffset;
-  ADstSave := 0;
-
-  { Get rule specific data }
-  if LRule <> nil then
-  begin
-    { Some little hacks to integrate this more powerful system in DateUtils' TTimeZone system.
-      AOffset in TTimeZone is always set to the same value all year long. ADstSave is provided in case of
-      ambiguous and invalid times. }
-    AType := LRule.GetLocalTimeType(ADateTime);
-
-    if AType = lttDaylight then
-      ADstSave := LRule.FOffset
-    else if AType = lttAmbiguous then
-    begin
-      { In case of ambiguous, fill in the dst save accordingly }
-      if LRule.FPrev <> nil then
-        ADstSave := LRule.FPrev.FOffset - LRule.FOffset
-      else
-        ADstSave := LRule.FOffset;
-    end else if AType = lttInvalid then
-    begin
-      { In case of invalid, fill in the dst save accordingly }
-      if LRule.FNext <> nil then
-        ADstSave := LRule.FNext.FOffset - LRule.FOffset
-      else
-        ADstSave := LRule.FOffset;
-    end;
-  end else
-    AType := lttStandard;
-
-  { The normal display name based on rule relationships }
-  if LRule <> nil then
-    LPRule := LRule.FRule
-  else
-    LPRule := nil;
-
-  ADisplayName := FormatAbbreviation(LPeriod.FPeriod, LPRule);
-
-  { The DST display name, only of ambiguity was found and we have a rule to prove it -- otherwise
-    its just the standard name. }
-  if (AType = lttAmbiguous) and (LRule.FPrev <> nil) then
-    ADstDisplayName := FormatAbbreviation(LPeriod.FPeriod, LRule.FPrev.FRule)
-  else
-    ADstDisplayName := ADisplayName;
+  Result := GetTimeZone(AAliasID).ID;
 end;
 
-class function TBundledTimeZone.KnownTimeZones(const AIncludeAliases: Boolean): 
-  {$IFDEF SUPPORTS_TARRAY}TArray<string>{$ELSE}TStringDynArray{$ENDIF};
+function TBundledTimeZone.GetYearBreakdown(const AYear: Word): TYearSegmentArray;
+begin
+  { Guard for upper and lower date/time limits }
+  if (AYear < 1) or (AYear > 9998) then
+    raise EUnknownTimeZoneYear.CreateResFmt(@SYearNotResolvable, [AYear, DoGetID()]);
+
+  Result := nil;
+
+{$IFDEF DELPHI}
+  MonitorEnter(FSegmentsByYear);
+{$ELSE}
+  FSegmentsByYearLock.Enter;
+{$ENDIF}
+  try
+    { Check if we have a cached list of matching rules for this date's year }
+    if not FSegmentsByYear.{$IFDEF DELPHI}TryGetValue{$ELSE}TryGetData{$ENDIF}(AYear, Result) then
+    begin
+      Result := BreakdownYearIntoSegments(FZone, AYear);
+
+      if Length(Result) = 0 then
+        raise EUnknownTimeZoneYear.CreateResFmt(@SYearNotResolvable, [AYear, DoGetID()]);
+
+      { Register the new array into the dictionary }
+      FSegmentsByYear.Add(AYear, Result);
+    end;
+
+  finally
+{$IFDEF DELPHI}
+    MonitorExit(FSegmentsByYear);
+{$ELSE}
+    FSegmentsByYearLock.Leave;
+{$ENDIF}
+  end;
+end;
+
+class function TBundledTimeZone.DbVersion: string;
+begin
+  { This value comes from 'TZDB.inc' }
+  Result := CIANAVersion;
+end;
+
+class function TBundledTimeZone.KnownAliases: TStringDynArray;
+var
+  I: Integer;
+begin
+  { Prepare the output array }
+  SetLength(Result, Length(CAliases));
+
+  { Copy the aliases in (if requested) }
+  for I := Low(CAliases) to High(CAliases) do
+  begin
+    Result[I] := CAliases[I].FName;
+  end;
+end;
+
+class function TBundledTimeZone.KnownTimeZones(const AIncludeAliases: Boolean): TStringDynArray;
 var
   I, LIndex: Integer;
 begin
@@ -1175,40 +1667,115 @@ begin
     end;
 end;
 
-{$IFNDEF SUPPORTS_TSTRINGS_OWNSOBJECTS}
-procedure FreeStringListObjects(const AStrings: TStrings);
+function TBundledTimeZone.HasDaylightTime(const AYear: Word): Boolean;
 var
-  LCurrent: Integer;
+  LSegment: TYearSegment;
 begin
-  for LCurrent := 0 to AStrings.Count - 1 do
-  begin
-    AStrings.Objects[LCurrent].Free;
-    AStrings.Objects[LCurrent] := nil;
-  end;
+  Result := TryFindSegment(AYear, lttDaylight, false, LSegment);
 end;
-{$ENDIF}
 
-initialization
-  { Create a lock for the time zone hash }
-{$IFNDEF SUPPORTS_MONITOR}
-  FTimeZoneCacheLock := TCriticalSection.Create();
-{$ENDIF}
+function TBundledTimeZone.StandardTimeEnd(const AYear: Word): TDateTime;
+var
+  LSegment: TYearSegment;
+begin
+  if TryFindSegment(AYear, lttStandard, true, LSegment) then
+    Result := LSegment.EndsAt
+  else
+    Result := CNullDateTime;
+end;
 
-  { Use THashedStringList for fast lookup. Also set ows objects to true. }
-  FTimeZoneCache := THashedStringList.Create();
-{$IFDEF SUPPORTS_TSTRINGS_OWNSOBJECTS}
-  FTimeZoneCache.OwnsObjects := True;
-{$ENDIF}
-  FTimeZoneCache.CaseSensitive := False;
+function TBundledTimeZone.StandardTimeStart(const aYear: word): TDateTime;
+var
+  LSegment: TYearSegment;
+begin
+  if TryFindSegment(AYear, lttStandard, false, LSegment) then
+    Result := LSegment.StartsAt
+  else
+    Result := CNullDateTime;
+end;
 
-finalization
-{$IFNDEF SUPPORTS_MONITOR}
-  FTimeZoneCacheLock.Free;
-{$ENDIF}
-{$IFNDEF SUPPORTS_TSTRINGS_OWNSOBJECTS}
-  FreeStringListObjects(FTimeZoneCache);
+function TBundledTimeZone.TryFindSegment(const AYear: Word; const AType: TLocalTimeType;
+   const ARev: Boolean; out ASegment: TYearSegment): Boolean;
+var
+  LSegments: TYearSegmentArray;
+  I: Integer;
+begin
+  LSegments := GetYearBreakdown(AYear);
+
+  { Invalid case but we'll handle it. }
+  if Length(LSegments) = 0 then
+    Exit(false);
+
+  { Special case of one segment. }
+  if Length(LSegments) = 1 then
+  begin
+    if LSegments[0].FType = AType then
+    begin
+      ASegment := LSegments[0];
+      Exit(true);
+    end;
+
+    Exit(false);
+  end;
+
+  { If the type is not the first, just find it. }
+  if ARev then
+  begin
+    for I := Low(LSegments) to High(LSegments) do
+    begin
+      if LSegments[I].FType = AType then
+      begin
+        ASegment := LSegments[I];
+        Exit(true);
+      end;
+    end;
+  end else
+  begin
+    for I := High(LSegments) downto Low(LSegments) do
+    begin
+      if LSegments[I].FType = AType then
+      begin
+        ASegment := LSegments[I];
+        Exit(true);
+      end;
+    end;
+  end;
+
+  { Nothing found. }
+  Exit(false);
+end;
+
+class function TBundledTimeZone.Version: string;
+begin
+  Result := CComponentVersion;
+end;
+
+procedure FinalizeDict(const ADict: {$IFDEF DELPHI}TDictionary{$ELSE}TFPGMap{$ENDIF}<string, TBundledTimeZone>);
+{$IFDEF FPC}
+var
+  I: Integer;
+begin
+    for I := 0 to ADict.Count - 1 do ADict.Data[I].Free;
+{$ELSE}
+var
+  LTZ: TBundledTimeZone;
+begin
+  for LTZ in ADict.Values do LTZ.Free;
 {$ENDIF}
   FTimeZoneCache.Free;
+end;
+
+initialization
+{$IFNDEF DELPHI}
+  FTimeZoneCacheLock := TCriticalSection.Create;
+{$ENDIF}
+
+  FTimeZoneCache := {$IFDEF DELPHI}TDictionary{$ELSE}TFPGMap{$ENDIF}<string, TBundledTimeZone>.Create;
+
+finalization
+  FinalizeDict(FTimeZoneCache);
+{$IFNDEF DELPHI}
+  FTimeZoneCacheLock.Free;
+{$ENDIF}
 
 end.
-

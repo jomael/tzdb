@@ -1,5 +1,5 @@
 (*
-* Copyright (c) 2010, Ciobanu Alexandru
+* Copyright (c) 2010-2020, Alexandru Ciobanu (alex+git@ciobanu.org)
 * All rights reserved.
 *
 * Redistribution and use in source and binary forms, with or without
@@ -25,24 +25,30 @@
 * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 *)
 
+{$INCLUDE '../TZDBPK/Version.inc'}
+
 unit TZSchema;
 
 interface
 uses
   Types,
   SysUtils,
-  TimeSpan,
   Classes,
   Character,
-  IOUtils,
   StrUtils,
   TZStrs,
+{$IFDEF DELPHI}
   Generics.Collections,
   Generics.Defaults,
+  TimeSpan,
+  IOUtils,
+{$ELSE}
+  FGL,
+{$ENDIF}
   DateUtils;
 
 type
-  TzDayType = (tzdFixed, tzdLast, tzdGEThan);
+  TzDayType = (tzdFixed, tzdLast, tzdGEThan, tzdLEThan);
 
   TzObject = class
     FIndexInFile: Integer;
@@ -76,10 +82,13 @@ type
     TRuleWithSpan = record
       FStart, FEnd: Word;
       FRule: TzRule;
+{$IFDEF FPC}
+      class operator Equal(const ALeft, ARight: TRuleWithSpan): Boolean;
+{$ENDIF}
     end;
   private
     FName: string;
-    FRules: TList<TRuleWithSpan>;
+    FRules: {$IFDEF FPC}TFPGList{$ELSE}TList{$ENDIF}<TRuleWithSpan>;
 
   public
     constructor Create;
@@ -100,10 +109,13 @@ type
       FUntilDay: TzDay;
       FUntilTime: Integer;
       FUntilChar: Char;
+{$IFDEF FPC}
+      class operator Equal(const ALeft, ARight: TZoneLine): Boolean;
+{$ENDIF}
     end;
   private
     FName: string;
-    FLines: TList<TZoneLine>;
+    FLines: {$IFDEF FPC}TFPGList{$ELSE}TList{$ENDIF}<TZoneLine>;
 
   public
     constructor Create;
@@ -115,12 +127,20 @@ type
   end;
 
   TzCache = class
+  private type
+    TAliasEntry = record
+      FAlias, FTimeZone: String;
+{$IFDEF FPC}
+      class operator Equal(const ALeft, ARight: TAliasEntry): Boolean;
+{$ENDIF}
+    end;
   private
-    FDays: TObjectList<TzDay>;
-    FRules: TObjectList<TzRule>;
-    FRuleFamilies: TObjectList<TzRuleFamily>;
-    FZones: TObjectList<TzZone>;
-    FLinks: TDictionary<string, TzZone>;
+    FDays: {$IFDEF FPC}TFPGObjectList{$ELSE}TObjectList{$ENDIF}<TzDay>;
+    FRules: {$IFDEF FPC}TFPGObjectList{$ELSE}TObjectList{$ENDIF}<TzRule>;
+    FRuleFamilies: {$IFDEF FPC}TFPGObjectList{$ELSE}TObjectList{$ENDIF}<TzRuleFamily>;
+    FZones: {$IFDEF FPC}TFPGObjectList{$ELSE}TObjectList{$ENDIF}<TzZone>;
+    FAliases: {$IFDEF FPC}TFPGList{$ELSE}TList{$ENDIF}<TAliasEntry>;
+    FResAliases: {$IFDEF FPC}TFPGMap{$ELSE}TDictionary{$ENDIF}<string, TzZone>;
 
     function GetUniqueDays: Cardinal;
     function GetUniqueRules: Cardinal;
@@ -135,16 +155,15 @@ type
     function GetFixedDay(const ADay: Word): TzDay;
     function GetLastDayOf(const ADayOfWeek: Word): TzDay;
     function GetNthDayOf(const ADayOfWeek, AIndex: Word): TzDay;
+    function GetPredDayOf(const ADayOfWeek, AIndex: Word): TzDay;
 
     function GetRule(const AInMonth: Word; const AOnDay: TzDay;
-      const AAt: Integer; const AAtChar: Char; const ASave: Integer; const ALetters: string): TzRule;
+      const AAt: Integer; const AAtChar: Char; const ASave: Integer; const ALetters: UnicodeString): TzRule;
 
     function GetRuleFamily(const AName: string): TzRuleFamily;
 
     function GetZone(const AName: string): TzZone;
-
-    procedure AddAlias(const AAlias: string; const AZone: TzZone); overload;
-    function AddAlias(const AAlias, AToZone: string): Boolean; overload;
+    procedure AddAlias(const AAlias, AToZone: string);
 
     { Properties }
     property UniqueDays: Cardinal read GetUniqueDays;
@@ -152,9 +171,9 @@ type
     property UniqueRuleFamilies: Cardinal read GetUniqueRuleFamilies;
 
     { Dumper! }
-    procedure DumpToFile(const AFile: string);
+    procedure Finalize;
+    procedure DumpToFile(const AFile, AVersion: string);
   end;
-
 
 type
   EProcessParseError = class(Exception);
@@ -166,12 +185,145 @@ type
   EProcessZoneError = class(Exception);
   EProcessLinkError = class(Exception);
 
-procedure Process(const AInputDir, AOutputFile: string);
+procedure Process(const AInputDir, AOutputFile, AVersion: string);
 
 var
   GlobalCache: TzCache;
 
 implementation
+
+{$IFDEF FPC}
+function EndsText(const ASubString: string; const AString: string): Boolean;
+begin
+  Result := RightStr(AString, Length(ASubString)) = ASubString;
+end;
+
+function StartsText(const ASubString: string; const AString: string): Boolean;
+begin
+  Result := Pos(ASubString, AString) = 1;
+end;
+
+function SplitString(const AString: string; const ADelimiters: AnsiString): TStringDynArray;
+var
+  I, P: Integer;
+  LSet: TSysCharSet;
+  LOutList: TFPGList<string>;
+begin
+  LSet := [];
+  for I := 1 to Length(ADelimiters) do Include(LSet, ADelimiters[I]);
+  LOutList := TFPGList<string>.Create();
+
+  P := 1;
+  for I := 1 to Length(AString) do
+  begin
+    if CharInSet(AString[I], LSet) then
+    begin
+      if P < I then LOutList.Add(Copy(AString, P, I - P)) else LOutList.Add('');
+      P := I + 1;
+    end;
+  end;
+
+  if P <= I then LOutList.Add(Copy(AString, P, I - P + 1));
+
+  SetLength(Result, LOutList.Count);
+  for I := 0 to LOutList.Count - 1 do Result[I] := LOutList[I];
+end;
+
+function ListFiles(const ADir: string): TStringDynArray;
+var
+  I: Integer;
+  LInfo: TSearchRec;
+  LOutList: TFPGList<string>;
+begin
+  LOutList := TFPGList<string>.Create();
+  if FindFirst(ConcatPaths([ADir, '*']), faAnyFile, LInfo) = 0 then
+  begin
+    repeat
+      if (LInfo.Attr and faDirectory) <> faDirectory then
+        LOutList.Add(ConcatPaths([ADir, LInfo.Name]))
+
+    until FindNext(LInfo) <> 0;
+  end;
+
+  FindClose(LInfo);
+
+  SetLength(Result, LOutList.Count);
+  for I := 0 to LOutList.Count - 1 do Result[I] := LOutList[I];
+end;
+
+function ReadFileLines(const AFile: string): TStringDynArray;
+var
+  I: Integer;
+  LContents: TStringList;
+begin
+  LContents := TStringList.Create();
+
+  Result := nil;
+  try
+    LContents.LoadFromFile(AFile);
+
+    SetLength(Result, LContents.Count);
+    for I := 0 to LContents.Count - 1 do Result[I] := LContents.Strings[I];
+  finally
+    LContents.Free();
+  end;
+end;
+
+function CompareStrings(const ALeft, ARight: String): Integer;
+begin
+  { Compare by name of regions }
+  Result := CompareStr(ALeft, ARight);
+end;
+
+class operator TzRuleFamily.TRuleWithSpan.Equal(const ALeft, ARight: TzRuleFamily.TRuleWithSpan): Boolean;
+begin
+  Result :=
+    (ALeft.FStart = ARight.FStart) and
+    (ALeft.FEnd = ARight.FEnd) and
+    (ALeft.FRule = ARight.FRule);
+end;
+
+class operator TzZone.TZoneLine.Equal(const ALeft, ARight: TzZone.TZoneLine): Boolean;
+begin
+  Result :=
+    (ALeft.FGmtOff = ARight.FGmtOff) and
+    (ALeft.FRuleFamily = ARight.FRuleFamily) and
+    (ALeft.FFormatStr = ARight.FFormatStr) and
+    (ALeft.FUntilYear = ARight.FUntilYear) and
+    (ALeft.FUntilMonth = ARight.FUntilMonth) and
+    (ALeft.FUntilDay = ARight.FUntilDay) and
+    (ALeft.FUntilTime = ARight.FUntilTime) and
+    (ALeft.FUntilChar = ARight.FUntilChar);
+end;
+
+class operator TzCache.TAliasEntry.Equal(const ALeft, ARight: TzCache.TAliasEntry): Boolean;
+begin
+  Result :=
+    (ALeft.FAlias = ARight.FAlias) and
+    (ALeft.FTimeZone = ARight.FTimeZone);
+end;
+
+const SecsPerHour = 60 * 60;
+
+{$ELSE}
+
+function ListFiles(const ADir: string): TStringDynArray;
+begin
+  Result := TDirectory.GetFiles(ADir);
+end;
+
+function ReadFileLines(const AFile: string): TStringDynArray;
+begin
+  Result := TFile.ReadAllLines(AFile);
+end;
+
+{$ENDIF}
+
+function CompareTzZones(const ALeft, ARight: TzZone): Integer;
+begin
+  { Compare by name of regions }
+  Result := CompareText(ALeft.FName, ARight.FName);
+end;
 
 function ZapString(const AInput: string): string;
 var
@@ -237,6 +389,7 @@ var
   LHour, LMinute, LSecond: Integer;
   LNewStr: string;
   LSign: Integer;
+
 begin
   LNewStr := AStr;
 
@@ -310,13 +463,13 @@ begin
 
     Result := GlobalCache.GetLastDayOf(LDoW);
 
-  end else if Pos('>=', AStr) > 0 then
+  end else if Pos(CNthDoW, AStr) > 0 then
   begin
-    LPos := Pos('>=', AStr);
+    LPos := Pos(CNthDoW, AStr);
 
     { Reccurence on Nth day of specified kind }
     LDoWStr := Copy(AStr, 1, LPos - 1);
-    LIndexStr := Copy(AStr, LPos + 2, Length(AStr));
+    LIndexStr := Copy(AStr, LPos + Length(CNthDoW), Length(AStr));
 
     try
       LDoW := TzStrToDayOfWeek(LDoWStr);
@@ -331,7 +484,27 @@ begin
     end;
 
     Result := GlobalCache.GetNthDayOf(LDoW, LIndex);
+  end else if Pos(CPreDoW, AStr) > 0 then
+  begin
+    LPos := Pos(CPreDoW, AStr);
 
+    { Reccurence on Nth day of specified kind }
+    LDoWStr := Copy(AStr, 1, LPos - 1);
+    LIndexStr := Copy(AStr, LPos + Length(CPreDoW), Length(AStr));
+
+    try
+      LDoW := TzStrToDayOfWeek(LDoWStr);
+    except
+      raise EProcessDayRecurError.CreateFmt(CPMBadDoWInNth, [LDoWStr]);
+    end;
+
+    try
+      LIndex := StrToInt(LIndexStr);
+    except
+      raise EProcessDayRecurError.CreateFmt(CPMBadIndexInNth, [LIndexStr]);
+    end;
+
+    Result := GlobalCache.GetPredDayOf(LDoW, LIndex);
   end else
   begin
     try
@@ -487,7 +660,7 @@ begin
   { The FORMAT parameter }
   LFormatStr := TzStrToFormat(AParts[LFixIdx + 2]);
 
-  { Defaultz for optinal parameters }
+  { Defaults for optional parameters }
   LUntilYear := 9999; { max year }
   LUntilMonth := 1;
   LUntilDay := nil;
@@ -555,8 +728,6 @@ end;
 procedure ProcessLink(const AParts: TStringDynArray);
 var
   LRealName, LAlias: string;
-
-  LZone: TzZone;
 begin
   if Length(AParts) < 2 then
     raise EProcessZoneError.CreateFmt(CPMBadLineSplitCount, [Length(AParts)]);
@@ -574,8 +745,7 @@ begin
     raise EProcessLinkError.Create(CPMBadLineTO);
 
   { Get real zone }
-  LZone := GlobalCache.GetZone(LRealName);
-  GlobalCache.AddAlias(LAlias, LZone);
+  GlobalCache.AddAlias(LAlias, LRealName);
 end;
 
 procedure RegisterStandardAliases();
@@ -610,126 +780,21 @@ begin
   GlobalCache.AddAlias('GMT-13', 'Etc/GMT-13');
   GlobalCache.AddAlias('GMT-14', 'Etc/GMT-14');
 
-  { WINDOWS translation table (from CLDR project) .. last updated by Pierre Y. on (Mon, 7 Apr 2014) }
-  GlobalCache.AddAlias('AUS Central Standard Time', 'Australia/Darwin');
-  GlobalCache.AddAlias('AUS Eastern Standard Time', 'Australia/Sydney');
-  GlobalCache.AddAlias('Afghanistan Standard Time', 'Asia/Kabul');
-  GlobalCache.AddAlias('Alaskan Standard Time', 'America/Anchorage');
-  GlobalCache.AddAlias('Arab Standard Time', 'Asia/Riyadh');
-  GlobalCache.AddAlias('Arabian Standard Time', 'Asia/Dubai');
-  GlobalCache.AddAlias('Arabic Standard Time', 'Asia/Baghdad');
-  GlobalCache.AddAlias('Argentina Standard Time', 'America/Buenos_Aires');
-  GlobalCache.AddAlias('Atlantic Standard Time', 'America/Halifax');
-  GlobalCache.AddAlias('Azerbaijan Standard Time', 'Asia/Baku');
-  GlobalCache.AddAlias('Azores Standard Time', 'Atlantic/Azores');
-  GlobalCache.AddAlias('Bahia Standard Time', 'America/Bahia');
-  GlobalCache.AddAlias('Bangladesh Standard Time', 'Asia/Dhaka');
-  GlobalCache.AddAlias('Canada Central Standard Time', 'America/Regina');
-  GlobalCache.AddAlias('Cape Verde Standard Time', 'Atlantic/Cape_Verde');
-  GlobalCache.AddAlias('Caucasus Standard Time', 'Asia/Yerevan');
-  GlobalCache.AddAlias('Cen. Australia Standard Time', 'Australia/Adelaide');
-  GlobalCache.AddAlias('Central America Standard Time', 'America/Guatemala');
-  GlobalCache.AddAlias('Central Asia Standard Time', 'Asia/Almaty');
-  GlobalCache.AddAlias('Central Brazilian Standard Time', 'America/Cuiaba');
-  GlobalCache.AddAlias('Central Europe Standard Time', 'Europe/Budapest');
-  GlobalCache.AddAlias('Central European Standard Time', 'Europe/Warsaw');
-  GlobalCache.AddAlias('Central Pacific Standard Time', 'Pacific/Guadalcanal');
-  GlobalCache.AddAlias('Central Standard Time (Mexico)', 'America/Mexico_City');
-  GlobalCache.AddAlias('Central Standard Time', 'America/Chicago');
-  GlobalCache.AddAlias('China Standard Time', 'Asia/Shanghai');
-  GlobalCache.AddAlias('Dateline Standard Time', 'Etc/GMT+12');
-  GlobalCache.AddAlias('E. Africa Standard Time', 'Africa/Nairobi');
-  GlobalCache.AddAlias('E. Australia Standard Time', 'Australia/Brisbane');
-  GlobalCache.AddAlias('E. South America Standard Time', 'America/Sao_Paulo');
-  GlobalCache.AddAlias('Eastern Standard Time', 'America/New_York');
-  GlobalCache.AddAlias('Egypt Standard Time', 'Africa/Cairo');
-  GlobalCache.AddAlias('Ekaterinburg Standard Time', 'Asia/Yekaterinburg');
-  GlobalCache.AddAlias('Fiji Standard Time', 'Pacific/Fiji');
-  GlobalCache.AddAlias('FLE Standard Time', 'Europe/Kiev');
-  GlobalCache.AddAlias('Georgian Standard Time', 'Asia/Tbilisi');
-  GlobalCache.AddAlias('GMT Standard Time', 'Europe/London');
-  GlobalCache.AddAlias('Greenland Standard Time', 'America/Godthab');
-  GlobalCache.AddAlias('Greenwich Standard Time', 'Atlantic/Reykjavik');
-  GlobalCache.AddAlias('GTB Standard Time', 'Europe/Bucharest');
-  GlobalCache.AddAlias('Hawaiian Standard Time', 'Pacific/Honolulu');
-  GlobalCache.AddAlias('India Standard Time', 'Asia/Calcutta');
-  GlobalCache.AddAlias('Iran Standard Time', 'Asia/Tehran');
-  GlobalCache.AddAlias('Israel Standard Time', 'Asia/Jerusalem');
-  GlobalCache.AddAlias('Jordan Standard Time', 'Asia/Amman');
-  GlobalCache.AddAlias('Kaliningrad Standard Time', 'Europe/Kaliningrad');
-  GlobalCache.AddAlias('Korea Standard Time', 'Asia/Seoul');
-  GlobalCache.AddAlias('Libya Standard Time', 'Africa/Tripoli');
-  GlobalCache.AddAlias('Magadan Standard Time', 'Asia/Magadan');
-  GlobalCache.AddAlias('Mauritius Standard Time', 'Indian/Mauritius');
-  GlobalCache.AddAlias('Middle East Standard Time', 'Asia/Beirut');
-  GlobalCache.AddAlias('Montevideo Standard Time', 'America/Montevideo');
-  GlobalCache.AddAlias('Morocco Standard Time', 'Africa/Casablanca');
-  GlobalCache.AddAlias('Mountain Standard Time (Mexico)', 'America/Chihuahua');
-  GlobalCache.AddAlias('Mountain Standard Time', 'America/Denver');
-  GlobalCache.AddAlias('Myanmar Standard Time', 'Asia/Rangoon');
-  GlobalCache.AddAlias('N. Central Asia Standard Time', 'Asia/Novosibirsk');
-  GlobalCache.AddAlias('Namibia Standard Time', 'Africa/Windhoek');
-  GlobalCache.AddAlias('Nepal Standard Time', 'Asia/Katmandu');
-  GlobalCache.AddAlias('New Zealand Standard Time', 'Pacific/Auckland');
-  GlobalCache.AddAlias('Newfoundland Standard Time', 'America/St_Johns');
-  GlobalCache.AddAlias('North Asia East Standard Time', 'Asia/Irkutsk');
-  GlobalCache.AddAlias('North Asia Standard Time', 'Asia/Krasnoyarsk');
-  GlobalCache.AddAlias('Pacific SA Standard Time', 'America/Santiago');
-  GlobalCache.AddAlias('Pacific Standard Time (Mexico)', 'America/Santa_Isabel');
-  GlobalCache.AddAlias('Pacific Standard Time', 'America/Los_Angeles');
-  GlobalCache.AddAlias('Pakistan Standard Time', 'Asia/Karachi');
-  GlobalCache.AddAlias('Paraguay Standard Time', 'America/Asuncion');
-  GlobalCache.AddAlias('Romance Standard Time', 'Europe/Paris');
-  GlobalCache.AddAlias('Russian Standard Time', 'Europe/Moscow');
-  GlobalCache.AddAlias('SA Eastern Standard Time', 'America/Cayenne');
-  GlobalCache.AddAlias('SA Pacific Standard Time', 'America/Bogota');
-  GlobalCache.AddAlias('SA Western Standard Time', 'America/La_Paz');
-  GlobalCache.AddAlias('Samoa Standard Time', 'Pacific/Apia');
-  GlobalCache.AddAlias('SE Asia Standard Time', 'Asia/Bangkok');
-  GlobalCache.AddAlias('Singapore Standard Time', 'Asia/Singapore');
-  GlobalCache.AddAlias('South Africa Standard Time', 'Africa/Johannesburg');
-  GlobalCache.AddAlias('Sri Lanka Standard Time', 'Asia/Colombo');
-  GlobalCache.AddAlias('Syria Standard Time', 'Asia/Damascus');
-  GlobalCache.AddAlias('Taipei Standard Time', 'Asia/Taipei');
-  GlobalCache.AddAlias('Tasmania Standard Time', 'Australia/Hobart');
-  GlobalCache.AddAlias('Tokyo Standard Time', 'Asia/Tokyo');
-  GlobalCache.AddAlias('Tonga Standard Time', 'Pacific/Tongatapu');
-  GlobalCache.AddAlias('Turkey Standard Time', 'Europe/Istanbul');
-  GlobalCache.AddAlias('Ulaanbaatar Standard Time', 'Asia/Ulaanbaatar');
-  GlobalCache.AddAlias('US Eastern Standard Time', 'America/Indianapolis');
-  GlobalCache.AddAlias('US Mountain Standard Time', 'America/Phoenix');
-  GlobalCache.AddAlias('UTC+12', 'Etc/GMT-12');
-  GlobalCache.AddAlias('UTC-02', 'Etc/GMT+2');
-  GlobalCache.AddAlias('UTC-11', 'Etc/GMT+11');
-  GlobalCache.AddAlias('Venezuela Standard Time', 'America/Caracas');
-  GlobalCache.AddAlias('Vladivostok Standard Time', 'Asia/Vladivostok');
-  GlobalCache.AddAlias('W. Australia Standard Time', 'Australia/Perth');
-  GlobalCache.AddAlias('W. Central Africa Standard Time', 'Africa/Lagos');
-  GlobalCache.AddAlias('W. Europe Standard Time', 'Europe/Berlin');
-  GlobalCache.AddAlias('West Asia Standard Time', 'Asia/Tashkent');
-  GlobalCache.AddAlias('West Pacific Standard Time', 'Pacific/Port_Moresby');
-  GlobalCache.AddAlias('Yakutsk Standard Time', 'Asia/Yakutsk');
-
-  { Missing translations in CLDR table }
-//  GlobalCache.AddAlias('E. Europe Standard Time', 'Europe/Minsk'); { unmappable }
-  GlobalCache.AddAlias('Kamchatka Standard Time', 'Asia/Kamchatka');
-  GlobalCache.AddAlias('Mid-Atlantic Standard Time', 'Etc/GMT+2');
+  { Windows mapping }
+  {$I WindowsTZ.inc}
 end;
 
 function CharToRel(const Ch: Char): string;
 begin
-  if CharInSet(Ch, ['w', 'W', #0]) then
-    Result := 'trLocal'
-  else if CharInSet(Ch, ['s', 's']) then
+  if CharInSet(Ch, ['s', 'S']) then
     Result := 'trStandard'
   else if CharInSet(Ch, ['u', 'g', 'z', 'U', 'G', 'Z']) then
     Result := 'trUniversal'
-  else begin
+  else
     Result := 'trLocal';
-  end;
 end;
 
-procedure Process(const AInputDir, AOutputFile: string);
+procedure Process(const AInputDir, AOutputFile, AVersion: string);
 var
   LFile, LLine: string;
   LLineIdx: Integer;
@@ -737,19 +802,20 @@ var
   LLineSplit: TStringDynArray;
   LZoneName: string;
 
-  LRules, LZones, LLinks: Integer;
+  LRules, LZones: Integer;
   LAllLines: TStringDynArray;
 begin
   LRules := 0;
   LZones := 0;
-  LLinks := 0;
 
   { now the work can begin! }
-  for LFile in TDirectory.GetFiles(AInputDir) do
+  for LFile in ListFiles(AInputDir) do
   begin
+    CLIMessage(Format(CPMStartedFile, [LFile]));
+
     { read line-by-line }
     LZoneName := '';
-    LAllLines := TFile.ReadAllLines(LFile);
+    LAllLines := ReadFileLines(LFile);
 
     for LLineIdx := 0 to Length(LAllLines) - 1 do
     begin
@@ -778,8 +844,6 @@ begin
       begin
         { Kill zone name }
         LZoneName := '';
-
-        Inc(LLinks);
 
         { Process rule! }
         ProcessLink(LLineSplit);
@@ -811,63 +875,37 @@ begin
   end;
 
   RegisterStandardAliases();
+  GlobalCache.Finalize;
 
-  Writeln(Format('Processed %d rules and %d zones', [LRules, LZones]));
-  Writeln(Format('  => %d day parts', [GlobalCache.UniqueDays]));
-  Writeln(Format('  => %d rules', [GlobalCache.UniqueRules]));
-  Writeln(Format('  => %d rule families', [GlobalCache.UniqueRuleFamilies]));
-  Writeln(Format('  => %d aliases', [LLinks]));
+  CLIMessage(Format(CPMStats, [LRules, LZones, GlobalCache.UniqueDays,
+    GlobalCache.UniqueRules, GlobalCache.UniqueRuleFamilies, GlobalCache.FResAliases.Count]));
 
-  Write('Dumping to "', AOutputFile, '" ...');
+  CLIMessage(Format(CPMStartDump, [AOutputFile]));
 
-  GlobalCache.DumpToFile(AOutputFile);
-  Writeln('[DONE]');
+  GlobalCache.DumpToFile(AOutputFile, AVersion);
+
+  CLIMessage('Processing finished!');
 end;
-
 
 { TzCache }
 
-procedure TzCache.AddAlias(const AAlias: string; const AZone: TzZone);
+procedure TzCache.AddAlias(const AAlias, AToZone: string);
 var
-  LZone: TzZone;
+  LAlias: TAliasEntry;
 begin
-  if FLinks.TryGetValue(AAlias, LZone) then
-    raise EInvalidOp.CreateFmt
-      ('Alias "%s" (to "%s") already registered with zone "%s".',
-      [AAlias, AZone.FName, LZone.FName]);
+  LAlias.FAlias := AAlias;
+  LAlias.FTimeZone := AToZone;
 
-  FLinks.Add(AAlias, AZone);
-end;
-
-function TzCache.AddAlias(const AAlias, AToZone: string): boolean;
-var
-  LZone: TzZone;
-begin
-  for LZone in FZones do
-    if SameText(LZone.FName, AToZone) then
-    begin
-      { Only add alias if the "to" zone actually exists }
-      AddAlias(AAlias, LZone);
-      Exit(true);
-    end;
-
-  if FLinks.TryGetValue(AToZone, LZone) then
-  begin
-    AddAlias(AAlias, LZone);
-    Exit(True);
-  end;
-
-  { failed! }
-  Result := false;
+  FAliases.Add(LAlias);
 end;
 
 constructor TzCache.Create;
 begin
-  FDays := TObjectList<TzDay>.Create(true);
-  FRules := TObjectList<TzRule>.Create(true);
-  FRuleFamilies := TObjectList<TzRuleFamily>.Create(true);
-  FZones := TObjectList<TzZone>.Create();
-  FLinks := TDictionary<string, TzZone>.Create();
+  FDays := {$IFDEF FPC}TFPGObjectList{$ELSE}TObjectList{$ENDIF}<TzDay>.Create(true);
+  FRules := {$IFDEF FPC}TFPGObjectList{$ELSE}TObjectList{$ENDIF}<TzRule>.Create(true);
+  FRuleFamilies := {$IFDEF FPC}TFPGObjectList{$ELSE}TObjectList{$ENDIF}<TzRuleFamily>.Create(true);
+  FZones := {$IFDEF FPC}TFPGObjectList{$ELSE}TObjectList{$ENDIF}<TzZone>.Create();
+  FAliases := {$IFDEF FPC}TFPGList{$ELSE}TList{$ENDIF}<TAliasEntry>.Create();
 end;
 
 destructor TzCache.Destroy;
@@ -876,104 +914,151 @@ begin
   FRules.Free;
   FRuleFamilies.Free;
   FZones.Free;
-  FLinks.Free;
+  FAliases.Free;
+  if FResAliases <> nil then FResAliases.Free;
 
   inherited;
 end;
 
-procedure TzCache.DumpToFile(const AFile: string);
+procedure TzCache.Finalize;
 var
-  LWriter: TStreamWriter;
+  LAliasEntry: TAliasEntry;
+  LResult: {$IFDEF FPC}TFPGMap{$ELSE}TDictionary{$ENDIF}<string, TzZone>;
+
+  procedure AddTzAlias(const AAlias: string; const AZone: TzZone);
+  var
+    LZone: TzZone;
+  begin
+    if LResult.{$IFDEF FPC}TryGetData{$ELSE}TryGetValue{$ENDIF}(AAlias, LZone) then
+      CLIError(Format(CPMAliasExists, [AAlias, LZone.FName, AZone.FName]))
+    else
+    begin
+      CLIMessage(Format(CPMAddedAlias, [AAlias, AZone.FName]));
+      LResult.Add(AAlias, AZone);
+    end;
+  end;
+
+  procedure AddAlias(const AAlias, AToZone: string);
+  var
+    LZone: TzZone;
+  begin
+    for LZone in FZones do
+    begin
+      if SameText(LZone.FName, AToZone) then
+      begin
+        AddTzAlias(AAlias, LZone);
+        Exit;
+      end;
+    end;
+
+    if LResult.{$IFDEF FPC}TryGetData{$ELSE}TryGetValue{$ENDIF}(AToZone, LZone) then
+    begin
+      AddTzAlias(AAlias, LZone);
+      Exit;
+    end;
+
+    CLIError(Format(CPMAliasFailed, [AAlias, AToZone]));
+  end;
+
+begin
+  LResult := {$IFDEF FPC}TFPGMap{$ELSE}TDictionary{$ENDIF}<string, TzZone>.Create;
+
+  for LAliasEntry in FAliases do
+    AddAlias(LAliasEntry.FAlias, LAliasEntry.FTimeZone);
+
+  FResAliases := LResult;
+end;
+
+procedure TzCache.DumpToFile(const AFile, AVersion: string);
+var
+  LFile: TextFile;
   LDay: TzDay;
   LRule: TzRule;
   LFam: TzRuleFamily;
   LZone: TzZone;
   I, X, LGhosts: Integer;
   LDayIdx, LRuleIdx: string;
-  LAliasList: TList<string>;
+  LAliasList: {$IFDEF FPC}TFPGList{$ELSE}TList{$ENDIF}<string>;
 begin
   { SOOOOOORT the collections that require lookup later }
-  FZones.Sort(TComparer<TzZone>.Construct(
-    function(const Left, Right: TzZone): Integer
-    begin
-      { Compare by name of regions }
-      Result := CompareText(Left.FName, Right.FName);
-    end
-  ));
+{$IFDEF FPC}
+  FZones.Sort(CompareTzZones);
+{$ELSE}
+  FZones.Sort(TComparer<TzZone>.Construct(CompareTzZones));
+{$ENDIF}
 
-  LWriter := TStreamWriter.Create(AFile);
+  AssignFile(LFile, AFile);
+  Rewrite(LFile);
   try
     { ========== HEADER =========== }
-    LWriter.WriteLine
-      ('{ This file is auto-generated. Do not change its contents since it is highly dependant on the consumer unit. }'
-      );
-
+    WriteLn(LFile, '{ This file is auto-generated. Do not change its contents since it is highly dependant on the consumer unit. }');
+    WriteLn(LFile, 'const');
+    WriteLn(LFile, '  CIANAVersion = ''' + AVersion + ''';');
+    WriteLn(LFile);
     { ======= Days ======== }
-    LWriter.WriteLine('var');
-    LWriter.WriteLine
-      ('  { This array contains the definitions of relative days used later on in the rules. }'
-      );
-    LWriter.WriteLine('  CRelativeDays: array[0 .. ' + IntToStr(FDays.Count - 1)
-        + '] of TRelativeDay = (');
+    WriteLn(LFile, 'var');
+    WriteLn(LFile, '  { This array contains the definitions of relative days used later on in the rules. }' );
+    WriteLn(LFile, '  CRelativeDays: array[0 .. ' + IntToStr(FDays.Count - 1) + '] of TRelativeDay = (');
 
     for I := 0 to FDays.Count - 1 do
     begin
       LDay := FDays[I];
       LDay.FIndexInFile := I;
-      LWriter.Write('    (FDayType: ');
+      Write(LFile, '    (FDayType: ');
 
       case LDay.FType of
         tzdFixed:
-          LWriter.Write('dtFixed; FFixedDay: ' + IntToStr(LDay.FFixedDay));
+          Write(LFile, 'dtFixed; FFixedDay: ' + IntToStr(LDay.FFixedDay));
 
         tzdLast:
-          LWriter.Write('dtLastOfMonth; FLastDayOfWeek: ' +
-              IntToStr(LDay.FDayOfWeek));
+          Write(LFile, 'dtLastOfMonth; FLastDayOfWeek: ' + IntToStr(LDay.FDayOfWeek));
 
         tzdGEThan:
-          LWriter.Write('tdNthOfMonth; FNthDayOfWeek: ' +
-              IntToStr(LDay.FDayOfWeek) + '; FDayIndex: ' +
+          Write(LFile, 'dtNthOfMonth; FNthDayOfWeek: ' +
+              IntToStr(LDay.FDayOfWeek) + '; FNthDayIndex: ' +
+              IntToStr(LDay.FDayIndex));
+
+        tzdLEThan:
+          Write(LFile, 'dtPredOfMonth; FPredDayOfWeek: ' +
+              IntToStr(LDay.FDayOfWeek) + '; FPredDayIndex: ' +
               IntToStr(LDay.FDayIndex));
       end;
 
       if I = (FDays.Count - 1) then
-        LWriter.WriteLine(')')
+        WriteLn(LFile, ')')
       else
-        LWriter.WriteLine('),');
+        WriteLn(LFile, '),');
     end;
 
-    LWriter.WriteLine('  );');
-    LWriter.WriteLine;
+    WriteLn(LFile, '  );');
+    WriteLn(LFile);
 
     { ======= RULES ======== }
-    LWriter.WriteLine('var');
-    LWriter.WriteLine
-      ('  { This array contains the definitions of DST rules. Used by rule families. }'
-      );
-    LWriter.WriteLine('  CRules: array[0 .. ' + IntToStr(FRules.Count - 1) +
-        '] of TRule = (');
+    WriteLn(LFile, 'var');
+    WriteLn(LFile, '  { This array contains the definitions of DST rules. Used by rule families. }');
+    WriteLn(LFile, '  CRules: array[0 .. ' + IntToStr(FRules.Count - 1) + '] of TRule = (');
 
     for I := 0 to FRules.Count - 1 do
     begin
       LRule := FRules[I];
       LRule.FIndexInFile := I;
-
-      LWriter.Write
-        (Format('    (FInMonth: %d; FOnDay: @CRelativeDays[%d]; FAt: %d; FAtMode: %s; FOffset: %d; FFmtPart: ''%s'')',
+      WriteLn(LFile, '   {CRules['+inttostr(i)+']}');
+      Write(LFile,
+        Format('    (FInMonth: %d; FOnDay: @CRelativeDays[%d]; FAt: %d; FAtMode: %s; FOffset: %d; FFmtPart: ''%s'')',
           [LRule.FInMonth, LRule.FOnDay.FIndexInFile, LRule.FAt, CharToRel(LRule.FAtChar), LRule.FSave,
             LRule.FLetters]));
 
       if I < (FRules.Count - 1) then
-        LWriter.Write(',');
+        Write(LFile, ',');
 
-      LWriter.WriteLine();
+      WriteLn(LFile);
     end;
 
-    LWriter.WriteLine('  );');
-    LWriter.WriteLine;
+    WriteLn(LFile, '  );');
+    WriteLn(LFile);
 
     { ======= RULE FAMILY PARTS ======== }
-    LWriter.WriteLine('var');
+    WriteLn(LFile, 'var');
 
     LGhosts := 0;
     for I := 0 to FRuleFamilies.Count - 1 do
@@ -989,36 +1074,34 @@ begin
         continue;
       end;
 
-      LWriter.WriteLine('  { Date-bound rules for ' + LFam.FName + ' family }');
-      LWriter.WriteLine('  CFamily_' + IntToStr(LFam.FIndexInFile) + '_Arr: array[0 .. ' +
+      WriteLn(LFile, '  { Date-bound rules for ' + LFam.FName + ' family }');
+      WriteLn(LFile, '  CFamily_' + IntToStr(LFam.FIndexInFile) + '_Arr: array[0 .. ' +
           IntToStr(LFam.FRules.Count - 1) + '] of TYearBoundRule = (');
 
       { Sort the rule array in desc order to allow simpler lookup }
 
-
       for X := 0 to LFam.FRules.Count - 1 do
       begin
-        LWriter.Write(Format('    (FStart: %d; FEnd: %d; FRule: @CRules[%d])', [LFam.FRules[X].FStart,
+        Write(LFile, Format('    (FStart: %d; FEnd: %d; FRule: @CRules[%d])', [LFam.FRules[X].FStart,
           LFam.FRules[X].FEnd, LFam.FRules[X].FRule.FIndexInFile]));
 
         if X < (LFam.FRules.Count - 1) then
-          LWriter.Write(',');
+          Write(LFile, ',');
 
-        LWriter.WriteLine();
+        WriteLn(LFile);
       end;
 
-      LWriter.WriteLine('  );');
-      LWriter.WriteLine;
+      WriteLn(LFile, '  );');
+      WriteLn(LFile);
     end;
 
 
     { ======= RULE FAMILIES ======== }
-    LWriter.WriteLine('var');
-    LWriter.WriteLine
-      ('  { This array contains rule families. }'
-      );
-    LWriter.WriteLine('  CRuleFamilies: array[0 .. ' + IntToStr(FRuleFamilies.Count - LGhosts - 1) +
-        '] of TRuleFamily = (');
+    WriteLn(LFile, 'var');
+    WriteLn(LFile, '  { This array contains rule families. }');
+
+    X := FRuleFamilies.Count - LGhosts;
+    WriteLn(LFile, '  CRuleFamilies: array[0 .. ' + IntToStr(X - 1) + '] of TRuleFamily = (');
 
     for I := 0 to FRuleFamilies.Count - 1 do
     begin
@@ -1028,19 +1111,20 @@ begin
       if LFam.FIndexInFile = -1 then
         continue;
 
-      LWriter.Write(Format('    (FCount: %d; FFirstRule: @CFamily_%d_Arr)', [LFam.FRules.Count, LFam.FIndexInFile]));
+      Write(LFile, Format('    (FCount: %d; FFirstRule: @CFamily_%d_Arr)', [LFam.FRules.Count, LFam.FIndexInFile]));
 
-      if I < (FRuleFamilies.Count - 1) then
-        LWriter.Write(',');
+      Dec(X);
+      if X > 0 then
+        Write(LFile, ',');
 
-      LWriter.WriteLine();
+      WriteLn(LFile);
     end;
 
-    LWriter.WriteLine('  );');
-    LWriter.WriteLine;
+    WriteLn(LFile, '  );');
+    WriteLn(LFile);
 
     { ======= ZONE PARTS ======== }
-    LWriter.WriteLine('var');
+    WriteLn(LFile, 'var');
 
     LGhosts := 0;
     for I := 0 to FZones.Count - 1 do
@@ -1059,8 +1143,8 @@ begin
 
       LZone.FIndexInFile := I;
 
-      LWriter.WriteLine('  { Time periods for ' + LZone.FName + ' zone }');
-      LWriter.WriteLine('  CZone_' + IntToStr(I) + '_Arr: array[0 .. ' +
+      WriteLn(LFile, '  { Time periods for ' + LZone.FName + ' zone }');
+      WriteLn(LFile, '  CZone_' + IntToStr(I) + '_Arr: array[0 .. ' +
           IntToStr(LZone.FLines.Count - 1) + '] of TPeriod = (');
 
       for X := 0 to LZone.FLines.Count - 1 do
@@ -1077,28 +1161,25 @@ begin
         else
           LRuleIdx := '@CRuleFamilies[' + IntToStr(LFam.FIndexInFile) + ']';
 
-        LWriter.Write(Format('    (FOffset: %d; FRuleFamily: %s; FFmtStr: ''%s''; FUntilYear: %d; ' +
+        Write(LFile, Format('    (FOffset: %d; FRuleFamily: %s; FFmtStr: ''%s''; FUntilYear: %d; ' +
           'FUntilMonth: %d; FUntilDay: %s; FUntilTime: %d; FUntilTimeMode: %s)',
           [LZone.FLines[X].FGmtOff, LRuleIdx, LZone.FLines[X].FFormatStr, LZone.FLines[X].FUntilYear,
            LZone.FLines[X].FUntilMonth, LDayIdx, LZone.FLines[X].FUntilTime, CharToRel(LZone.FLines[X].FUntilChar)]));
 
         if X < (LZone.FLines.Count - 1) then
-          LWriter.Write(',');
+          Write(LFile, ',');
 
-        LWriter.WriteLine();
+        WriteLn(LFile);
       end;
 
-      LWriter.WriteLine('  );');
-      LWriter.WriteLine;
+      WriteLn(LFile, '  );');
+      WriteLn(LFile);
     end;
 
     { ======= ZONES ======== }
-    LWriter.WriteLine('var');
-    LWriter.WriteLine
-      ('  { This array contains zones. }'
-      );
-    LWriter.WriteLine('  CZones: array[0 .. ' + IntToStr(FZones.Count - LGhosts - 1) +
-        '] of TZone = (');
+    WriteLn(LFile, 'var');
+    WriteLn(LFile, '  { This array contains zones. }');
+    WriteLn(LFile, '  CZones: array[0 .. ' + IntToStr(FZones.Count - LGhosts - 1) + '] of TZone = (');
 
     for I := 0 to FZones.Count - 1 do
     begin
@@ -1107,60 +1188,63 @@ begin
       if LZone.FIndexInFile = -1 then
         continue;
 
-      LWriter.Write(Format('    (FName: ''%s''; FCount: %d; FFirstPeriod: @CZone_%d_Arr)',
+      Write(LFile, Format('    (FName: ''%s''; FCount: %d; FFirstPeriod: @CZone_%d_Arr)',
         [LZone.FName, LZone.FLines.Count, LZone.FIndexInFile]));
 
       if I < (FZones.Count - 1) then
-        LWriter.Write(',');
+        Write(LFile, ',');
 
-      LWriter.WriteLine();
+      WriteLn(LFile);
     end;
 
-    LWriter.WriteLine('  );');
-    LWriter.WriteLine;
+    WriteLn(LFile, '  );');
+    WriteLn(LFile);
 
     { ======= ALIASES ======== }
-    LAliasList := TList<string>.Create(FLinks.Keys);
-    LAliasList.Sort;
+{$IFDEF FPC}
+    LAliasList := TFPGList<string>.Create();
+    for I := 0 to FResAliases.Count - 1 do LAliasList.Add(FResAliases.Keys[I]);
+    LAliasList.Sort(CompareStrings);
+{$ELSE}
+    LAliasList := TList<string>.Create(FResAliases.Keys);
+    LAliasList.Sort();
+{$ENDIF}
 
     { Calculate the real number of aliases, based on ghost zones }
     LGhosts := 0;
     for I := 0 to LAliasList.Count - 1 do
     begin
-      LZone := FLinks[LAliasList[I]];
+      LZone := FResAliases[LAliasList[I]];
       if LZone.FIndexInFile = -1 then
         Inc(LGhosts);
     end;
 
-    LWriter.WriteLine('var');
-    LWriter.WriteLine
-      ('  { This array contains zone aliases. }'
-      );
-    LWriter.WriteLine('  CAliases: array[0 .. ' + IntToStr(LAliasList.Count - LGhosts - 1) +
-        '] of TZoneAlias = (');
+    WriteLn(LFile, 'var');
+    WriteLn(LFile, '  { This array contains zone aliases. }');
+    WriteLn(LFile, '  CAliases: array[0 .. ' + IntToStr(LAliasList.Count - LGhosts - 1) + '] of TZoneAlias = (');
 
     for I := 0 to LAliasList.Count - 1 do
     begin
-      LZone := FLinks[LAliasList[I]];
+      LZone := FResAliases[LAliasList[I]];
 
       if LZone.FIndexInFile = -1 then
         continue;
 
-      LWriter.Write(Format('    (FName: ''%s''; FAliasTo: @CZones[%d])',
+      Write(LFile, Format('    (FName: ''%s''; FAliasTo: @CZones[%d])',
         [LAliasList[I], LZone.FIndexInFile]));
 
       if I < (LAliasList.Count - 1) then
-        LWriter.Write(',');
+        Write(LFile, ',');
 
-      LWriter.WriteLine();
+      WriteLn(LFile);
     end;
 
-    LWriter.WriteLine('  );');
-    LWriter.WriteLine;
+    WriteLn(LFile, '  );');
+    WriteLn(LFile);
 
     LAliasList.Free;
   finally
-    LWriter.Free;
+    CloseFile(LFile);
   end;
 end;
 
@@ -1211,6 +1295,23 @@ begin
   FDays.Add(Result);
 end;
 
+function TzCache.GetPredDayOf(const ADayOfWeek, AIndex: Word): TzDay;
+var
+  LDay: TzDay;
+begin
+  for LDay in FDays do
+    if (LDay.FType = tzdLEThan) and (LDay.FDayOfWeek = ADayOfWeek) and
+      (LDay.FDayIndex = AIndex) then
+      Exit(LDay);
+
+  Result := TzDay.Create;
+  Result.FType := tzdLEThan;
+  Result.FDayOfWeek := ADayOfWeek;
+  Result.FDayIndex := AIndex;
+
+  FDays.Add(Result);
+end;
+
 function TzCache.GetRule(const AInMonth: Word; const AOnDay: TzDay;
   const AAt: Integer; const AAtChar: Char; const ASave: Integer; const ALetters: string): TzRule;
 var
@@ -1230,6 +1331,8 @@ begin
   Result.FSave := ASave;
   Result.FLetters := ALetters;
 
+  CLIMessage(Format(CPMAddedRule, [AInMonth, Ord(AOnDay.FType), AOnDay.FFixedDay, AOnDay.FDayOfWeek, AOnDay.FDayIndex, AAt, AAtChar, ASave, ALetters]));
+
   FRules.Add(Result);
 end;
 
@@ -1243,6 +1346,8 @@ begin
 
   Result := TzRuleFamily.Create;
   Result.FName := AName;
+
+  CLIMessage(Format(CPMAddedRuleFamily, [AName]));
 
   FRuleFamilies.Add(Result);
 end;
@@ -1273,6 +1378,8 @@ begin
   Result := TzZone.Create;
   Result.FName := AName;
 
+  CLIMessage(Format(CPMAddedZone, [AName]));
+
   FZones.Add(Result);
 end;
 
@@ -1292,7 +1399,7 @@ end;
 
 constructor TzRuleFamily.Create;
 begin
-  FRules := TList<TRuleWithSpan>.Create();
+  FRules := {$IFDEF FPC}TFPGList{$ELSE}TList{$ENDIF}<TRuleWithSpan>.Create();
 end;
 
 destructor TzRuleFamily.Destroy;
@@ -1325,7 +1432,7 @@ end;
 
 constructor TzZone.Create;
 begin
-  FLines := TList<TZoneLine>.Create;
+  FLines := {$IFDEF FPC}TFPGList{$ELSE}TList{$ENDIF}<TZoneLine>.Create;
 end;
 
 destructor TzZone.Destroy;

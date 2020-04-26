@@ -4,5 +4,13 @@
 *.bpi
 *.dproj.local
 __history
+__recovery
 bin
-
+*.stat
+*.o
+*.ppu
+*.rsj
+.vscode/
+vscode.code-workspace
+*.identcache
+*.groupproj.local

@@ -1,5 +1,5 @@
 (*
-* Copyright (c) 2010, Ciobanu Alexandru
+* Copyright (c) 2010-2020, Alexandru Ciobanu (alex+git@ciobanu.org)
 * All rights reserved.
 *
 * Redistribution and use in source and binary forms, with or without
@@ -25,6 +25,8 @@
 * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 *)
 
+{$INCLUDE '../TZDBPK/Version.inc'}
+
 unit TZStrs;
 interface
 
@@ -40,6 +42,8 @@ const
     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec');
 
   CLastDoW = 'last';
+  CNthDoW  = '>=';
+  CPreDoW  = '<=';
   CMinDate = 'min';
   CMaxDate = 'max';
   COnlyDate = 'only';
@@ -50,10 +54,11 @@ const
   CZoneId = 'Zone';
 
 resourcestring
-  CCLIHeader = 'TZ file updater. (c) 2010 Ciobanu Alexandru. Part of TZDB project.';
-  CCLIUsage  = 'USAGE: <TzUpdate> input-dir output-file' + sLineBreak +
-               '  input-dir  : The path to the directory containing tzinfo database files.' + sLineBreak +
-               '  output-file: The path to the INC file that will contain the converted data.';
+  CCLIHeader = 'TZ Compiler. (c) 2010-2019 Alexandru Ciobanu (alex+git@ciobanu.org). Part of TZDB project.';
+  CCLIUsage  = 'USAGE: <TZCompile> input-dir output-file iana_db_version' + sLineBreak +
+               '  input-dir      : The path to the directory containing tzinfo database files.' + sLineBreak +
+               '  output-file    : The path to the INC file that will contain the converted data.' + sLineBreak +
+               '  iana_db_version: The version of the IANA DB that is being compiled (e.g. 2019b).';
 
   CCLIError_Prefix    = 'ERROR:';
   CCLIFatal_Prefix    = 'FATAL:';
@@ -61,7 +66,8 @@ resourcestring
 
   { Main messages }
   CCLIBadInputDir     = 'Input directory "%s" does not exist or is inaccessible.';
-  CCLIBadOutputDir    = 'Ouput file''s directory "%s" does not exist or is inaccessible.';
+  CCLIBadOutputDir    = 'Output file''s directory "%s" does not exist or is inaccessible.';
+  CCLIBadVersion      = 'The supplied version string "%s" is invalid.';
   CCLIGlobalException = 'An unhandled exception was raised while processing files. Exception type is %s; and message is "%s".';
 
   { Processing messages }
@@ -95,7 +101,17 @@ resourcestring
   CPMBadLineFROM = 'Found an invalid FROM field (empty or bad format).';
   CPMBadLineTO = 'Found an invalid TO field (empty or bad format).';
 
+  CPMAliasExists = 'Alias "%s" already points to zone "%s". Cannot reassign to zone "%s".';
+  CPMAddedAlias = 'Added new alias "%s" for zone "%s".';
+  CPMAliasFailed = 'Failed to add alias "%s". The referenced time zone "%s" does not exist.';
+  CPMAddedZone = 'Added new zone "%s".';
+  CPMAddedRuleFamily = 'Added new rule family "%s".';
+  CPMAddedRule = 'Added new rule for month %d, day [%d/%d/%d/%d], at %d, char "%s", offset %d and letters "%s".';
   CPMBadFile = 'Unable to parse "%s" line in file (%s). Skipping!';
+
+  CPMStartedFile = 'Processing file "%s" ...';
+  CPMStats = 'Processed %d rules; %d zones; %d day parts; %d unique rules; %d unique rule families; %d aliases.';
+CPMStartDump = 'Dumping parsed contents to "%s" ...';
 
 implementation
 
@@ -104,7 +120,7 @@ begin
   Write(CCLIFatal_Prefix, ' ');
   WriteLn(AMessage);
 
-  Halt;
+  Halt(1);
 end;
 
 procedure CLIError(const AMessage: string);

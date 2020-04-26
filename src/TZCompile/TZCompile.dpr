@@ -1,5 +1,5 @@
 (*
-* Copyright (c) 2010, Ciobanu Alexandru
+* Copyright (c) 2010-2020, Alexandru Ciobanu (alex+git@ciobanu.org)
 * All rights reserved.
 *
 * Redistribution and use in source and binary forms, with or without
@@ -27,26 +27,30 @@
 
 program TZCompile;
 
-{$APPTYPE CONSOLE}
+{$INCLUDE '../TZDBPK/Version.inc'}
+
+{$IFDEF DELPHI}
+  {$APPTYPE CONSOLE}
+{$ENDIF}
 
 uses
   SysUtils,
   DateUtils,
   Character,
   Classes,
-  IOUtils,
   Types,
   StrUtils,
   TZSchema in 'TZSchema.pas',
   TZStrs in 'TZStrs.pas';
 
 var
-  LInputDir, LOutputFile: string;
+  C: Char;
+  LInputDir, LOutputFile, LVersion: string;
 begin
   { Process parameters }
   WriteLn(CCLIHeader);
 
-  if ParamCount() < 2 then
+  if ParamCount() < 3 then
   begin
     WriteLn(CCLIUsage);
     Exit;
@@ -54,6 +58,14 @@ begin
 
   LInputDir := ParamStr(1);
   LOutputFile := ParamStr(2);
+  LVersion := ParamStr(3);
+
+  { Validate the version number. }
+  for C in LVersion do
+  begin
+    if not CharInSet(C, ['0' .. '9', 'a' .. 'z']) Then
+      CLIFatal(Format(CCLIBadVersion, [LVersion]));
+  end;
 
   { Verify input directory }
   if not DirectoryExists(LInputDir) then
@@ -65,12 +77,11 @@ begin
 
   { Start the process! }
   try
-    Process(LInputDir, LOutputFile);
+    Process(LInputDir, LOutputFile, LVersion);
   except
     on E: Exception do
+    begin
       CLIFatal(Format(CCLIGlobalException, [E.ClassName, E.Message]));
+    end;
   end;
-
-  readln;
 end.
-
